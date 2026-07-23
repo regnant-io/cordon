@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build & test (deny warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Enforce the baseline: the workspace builds with zero warnings.
+      - name: Build (all targets, warnings are errors)
+        run: cargo build --all-targets
+        env:
+          RUSTFLAGS: "-D warnings"
+      - name: Test
+        run: cargo test --all
+
+  lint:
+    name: rustfmt & clippy (advisory)
+    runs-on: ubuntu-latest
+    # Advisory: the legacy tree is not fully rustfmt-normalized and clippy
+    # surfaces pre-existing style lints. Kept as signal, not a gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets
+
+  audit:
+    name: cargo audit (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
