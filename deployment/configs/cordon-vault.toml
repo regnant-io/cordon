@@ -1,0 +1,99 @@
+# Cordon v2.0 — Vault Mode Configuration
+# Regulated enterprise: private network + management channel, FIPS L3 HSM,
+# multi-tenant, AMD SEV-SNP mandatory.
+
+mode = "vault"
+node_id = "REPLACE_WITH_UNIQUE_NODE_ID"
+deployment_name = "REPLACE_WITH_DEPLOYMENT_NAME"
+deployment_id = "REPLACE_WITH_DEPLOYMENT_ID"
+log_level = "info"
+
+[network]
+bind_address = "0.0.0.0"
+api_port = 8443
+require_mtls = true
+outbound_policy = "zero_egress"
+hardware_firewall = "palo_alto"
+smartnic_acl = true
+tls_cert_path = "/var/lib/cordon/tls/server.crt"
+tls_key_path = "/var/lib/cordon/tls/server.key"
+client_ca_path = "/etc/cordon/client-ca.crt"
+
+[[network.inbound_whitelist]]
+cidr = "10.0.0.0/8"
+port = 8443
+protocol = "tls1.3"
+
+[network.mgmt_channel]
+endpoint = "ops.internal:9443"
+certificate_pin = "sha256:REPLACE_WITH_PIN"
+
+[tee]
+preferred = "amd_sev_snp"
+minimum_security_version = 3
+re_attestation_interval_hours = 24
+halt_on_attestation_failure = true
+cache_partitioning = true
+
+[side_channel]
+constant_time_enforcement = true
+memory_zeroize_on_completion = true
+response_size_padding = true
+
+[side_channel.timing_normalization]
+enabled = true
+mode = "bucket"
+bucket_ms = 100
+fixed_floor_ms = 0
+
+[hsm]
+provider = "thales_luna"
+fips_level = 3
+slot_id = 0
+pin_env_var = "CORDON_HSM_PIN"
+
+[boot]
+tpm_required = true
+tpm_version = "2.0"
+secure_boot = true
+dm_verity = true
+
+[boot.pcr_policy]
+required_pcrs = [0, 4, 7, 8, 11, 13]
+# Populate expected_values at provisioning time via: cordon attest --print-pcrs
+expected_values = {}
+
+[model_store]
+path = "/var/lib/cordon/bundles"
+integrity_check_interval_minutes = 15
+halt_on_tamper = true
+
+[inference]
+max_concurrent_requests = 32
+default_timeout_seconds = 120
+client_kv_cache_isolation = true
+kv_cache_zero_on_session_end = true
+multi_tenant = true
+max_input_tokens = 32768
+max_output_tokens = 4096
+
+[audit]
+log_path = "/var/lib/cordon/audit"
+log_format = "jsonl"
+export_method = "encrypted_push"
+retention_days = 365
+signing_key_from_enclave = true
+
+[updates]
+source = "mgmt_channel"
+require_vendor_signature = true
+require_client_signature = true
+staged_rollout = true
+auto_apply = false
+
+[sustained_attack]
+auth_failure_threshold_per_minute = 10
+global_failure_threshold_per_minute = 50
+covert_channel_score_threshold = 0.7
+quarantine_on_critical = true
+replay_probe_threshold = 20

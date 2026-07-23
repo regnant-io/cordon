@@ -1,0 +1,28 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+.env
+
+# Key material — never commit
+*.hex
+*.pem
+*.key
+sanctum-keys/
+**/cmk*
+
+# Secrets
+.env
+*.env
+sanctum.env
+
+# Logs
+*.jsonl
+/var/
+
+# Build artifacts
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp

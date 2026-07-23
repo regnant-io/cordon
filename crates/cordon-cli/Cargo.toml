@@ -1,0 +1,44 @@
+[package]
+name = "cordon-cli"
+version = "2.0.0"
+edition = "2021"
+description = "Cordon command-line tools — node server, keygen, log verifier, provisioning"
+
+[[bin]]
+name = "cordon"
+path = "src/main.rs"
+
+[[bin]]
+name = "cordon-keygen"
+path = "src/keygen.rs"
+
+[[bin]]
+name = "cordon-verify-log"
+path = "src/verify_log.rs"
+
+[[bin]]
+name = "cordon-provision"
+path = "src/provision.rs"
+
+[dependencies]
+cordon-core = { path = "../cordon-core" }
+cordon-crypto = { path = "../cordon-crypto" }
+cordon-audit = { path = "../cordon-audit" }
+cordon-api = { path = "../cordon-api" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+dirs = { workspace = true }
+reqwest = { workspace = true }

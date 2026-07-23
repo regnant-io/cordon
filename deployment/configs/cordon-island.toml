@@ -1,0 +1,93 @@
+# Cordon v2.0 — Island Mode Configuration
+# Government / critical infrastructure: private LAN only, FIPS L3, 500ms timing buckets.
+
+mode = "island"
+node_id = "REPLACE_WITH_UNIQUE_NODE_ID"
+deployment_name = "REPLACE_WITH_DEPLOYMENT_NAME"
+deployment_id = "REPLACE_WITH_DEPLOYMENT_ID"
+log_level = "warn"
+
+[network]
+bind_address = "0.0.0.0"
+api_port = 8443
+require_mtls = true
+outbound_policy = "zero_egress"
+hardware_firewall = "juniper_srx"
+smartnic_acl = true
+tls_cert_path = "/var/lib/cordon/tls/server.crt"
+tls_key_path = "/var/lib/cordon/tls/server.key"
+client_ca_path = "/etc/cordon/client-ca.crt"
+
+[[network.inbound_whitelist]]
+cidr = "192.168.0.0/16"
+port = 8443
+protocol = "tls1.3"
+
+[tee]
+preferred = "amd_sev_snp"
+minimum_security_version = 3
+re_attestation_interval_hours = 12
+halt_on_attestation_failure = true
+cache_partitioning = true
+
+[side_channel]
+constant_time_enforcement = true
+memory_zeroize_on_completion = true
+response_size_padding = true
+
+[side_channel.timing_normalization]
+enabled = true
+mode = "bucket"
+bucket_ms = 500
+fixed_floor_ms = 0
+
+[hsm]
+provider = "entrust_nshield"
+fips_level = 3
+slot_id = 0
+pin_env_var = "CORDON_HSM_PIN"
+
+[boot]
+tpm_required = true
+tpm_version = "2.0"
+secure_boot = true
+dm_verity = true
+
+[boot.pcr_policy]
+required_pcrs = [0, 4, 7, 8, 11, 13]
+expected_values = {}
+
+[model_store]
+path = "/var/lib/cordon/bundles"
+integrity_check_interval_minutes = 15
+halt_on_tamper = true
+
+[inference]
+max_concurrent_requests = 16
+default_timeout_seconds = 120
+client_kv_cache_isolation = true
+kv_cache_zero_on_session_end = true
+multi_tenant = false
+max_input_tokens = 32768
+max_output_tokens = 4096
+
+[audit]
+log_path = "/var/lib/cordon/audit"
+log_format = "jsonl"
+export_method = "operator_pull"
+retention_days = 730
+signing_key_from_enclave = true
+
+[updates]
+source = "internal_mirror"
+require_vendor_signature = true
+require_client_signature = true
+staged_rollout = true
+auto_apply = false
+
+[sustained_attack]
+auth_failure_threshold_per_minute = 5
+global_failure_threshold_per_minute = 25
+covert_channel_score_threshold = 0.6
+quarantine_on_critical = true
+replay_probe_threshold = 10

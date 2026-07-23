@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cordon</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #09090b;
+    --bg1:      #111113;
+    --bg2:      #18181b;
+    --border:   #27272a;
+    --border2:  #3f3f46;
+    --text:     #fafafa;
+    --text2:    #a1a1aa;
+    --text3:    #71717a;
+    --accent:   #818cf8;
+    --accent-d: #4f46e5;
+    --green:    #34d399;
+    --green-bg: #052e16;
+    --yellow:   #fbbf24;
+    --yellow-bg:#1c1400;
+    --red:      #f87171;
+    --mono:     'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --sans:     -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+    --radius:   8px;
+    --radius-lg:12px;
+  }
+
+  html { font-size: 14px; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Nav ── */
+  nav {
+    display: flex; align-items: center; gap: 2px;
+    padding: 0 24px; height: 48px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(9,9,11,.85);
+    backdrop-filter: blur(16px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .nav-logo {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 600; color: var(--text);
+    letter-spacing: -.01em; margin-right: 16px;
+  }
+  .nav-logo svg { opacity: .9; }
+  nav a.nav-link {
+    font-size: 13px; color: var(--text3); padding: 4px 10px;
+    border-radius: var(--radius); transition: color .15s, background .15s;
+  }
+  nav a.nav-link:hover { color: var(--text); background: var(--bg2); text-decoration: none; }
+  .nav-spacer { flex: 1; }
+  .nav-status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-family: var(--mono); color: var(--text3);
+  }
+  .status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2.5s ease-in-out infinite;
+  }
+  .status-dot.warn { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+
+  /* ── Layout ── */
+  .page { max-width: 960px; margin: 0 auto; padding: 64px 24px 96px; }
+
+  /* ── Hero ── */
+  .hero { margin-bottom: 56px; }
+  .hero-eyebrow {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-family: var(--mono); font-weight: 500;
+    color: var(--text3); letter-spacing: .08em; text-transform: uppercase;
+    margin-bottom: 20px;
+  }
+  .hero-eyebrow::before {
+    content: ''; display: block; width: 16px; height: 1px; background: var(--border2);
+  }
+  h1 {
+    font-size: clamp(32px, 5vw, 48px);
+    font-weight: 700; letter-spacing: -.03em; line-height: 1.1;
+    color: var(--text); margin-bottom: 12px;
+  }
+  .hero-sub {
+    font-size: 15px; color: var(--text2); max-width: 480px; line-height: 1.6;
+    margin-bottom: 28px;
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-family: var(--mono); font-weight: 500;
+    padding: 3px 8px; border-radius: 4px;
+    border: 1px solid;
+  }
+  .badge-green { color: var(--green); border-color: #064e3b; background: var(--green-bg); }
+  .badge-yellow { color: var(--yellow); border-color: #78350f; background: var(--yellow-bg); }
+
+  /* ── Stat grid ── */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    margin-bottom: 40px;
+  }
+  .stat {
+    background: var(--bg1);
+    padding: 20px 22px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .stat-label {
+    font-size: 11px; font-family: var(--mono); font-weight: 500;
+    color: var(--text3); letter-spacing: .06em; text-transform: uppercase;
+  }
+  .stat-value {
+    font-size: 13px; font-weight: 500; color: var(--text);
+    word-break: break-all; line-height: 1.4;
+  }
+  .stat-value.mono { font-family: var(--mono); font-size: 11px; color: var(--text2); }
+
+  /* ── Actions ── */
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 8px 16px; border-radius: var(--radius);
+    font-size: 13px; font-weight: 500; cursor: pointer;
+    border: 1px solid transparent; transition: all .15s;
+    text-decoration: none;
+  }
+  .btn-primary {
+    background: var(--accent-d); color: #fff; border-color: var(--accent-d);
+  }
+  .btn-primary:hover { background: #4338ca; border-color: #4338ca; text-decoration: none; color: #fff; }
+  .btn-ghost {
+    background: transparent; color: var(--text2); border-color: var(--border2);
+  }
+  .btn-ghost:hover { background: var(--bg2); color: var(--text); text-decoration: none; }
+  .btn svg { opacity: .7; }
+
+  /* ── Footer ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 20px 24px;
+    font-size: 11px; font-family: var(--mono);
+    color: var(--text3);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/ui" class="nav-logo" style="text-decoration:none;">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <path d="M8 1L14.928 5V11L8 15L1.072 11V5L8 1Z" stroke="#818cf8" stroke-width="1.2" fill="none"/>
+      <path d="M8 4L12 6.5V11.5L8 14L4 11.5V6.5L8 4Z" fill="#818cf8" opacity=".15"/>
+    </svg>
+    Cordon
+  </a>
+  <a href="/ui" class="nav-link">Overview</a>
+  <a href="/ui/chat" class="nav-link">Chat</a>
+  <a href="/ui/endpoints" class="nav-link">API</a>
+  <a href="/ui/docs" class="nav-link">Docs</a>
+  <div class="nav-spacer"></div>
+  <div class="nav-status">
+    <span class="status-dot {PILL_DOT}"></span>
+    {STATUS}
+  </div>
+</nav>
+
+<div class="page">
+  <div class="hero">
+    <div class="hero-eyebrow">Private Inference Engine &nbsp;v{VERSION}</div>
+    <h1>Secure AI,<br>verifiably private.</h1>
+    <p class="hero-sub">Every inference runs inside a verified TEE. Weights are encrypted at rest. Every request is cryptographically logged before a response is returned.</p>
+    <span class="badge badge-{BADGE_CLASS}">{STATUS}</span>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat">
+      <div class="stat-label">TEE Mode</div>
+      <div class="stat-value">{TEE}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Inference Backend</div>
+      <div class="stat-value">{BACKEND}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Node ID</div>
+      <div class="stat-value mono">{NODE_ID}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">MRENCLAVE</div>
+      <div class="stat-value mono">{MRENCLAVE}</div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <a href="/ui/chat" class="btn btn-primary">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      Open Chat
+    </a>
+    <a href="/ui/endpoints" class="btn btn-ghost">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      API Explorer
+    </a>
+    <a href="/ui/docs" class="btn btn-ghost">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      Documentation
+    </a>
+  </div>
+</div>
+
+<footer>
+  <span>Cordon v{VERSION} &mdash; Private Inference Engine</span>
+  <span>TEE: {TEE} &nbsp;&middot;&nbsp; {BACKEND}</span>
+</footer>
+
+</body>
+</html>

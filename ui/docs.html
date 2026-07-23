@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cordon — Documentation</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#09090b; --bg1:#111113; --bg2:#18181b;
+    --border:#27272a; --border2:#3f3f46;
+    --text:#fafafa; --text2:#a1a1aa; --text3:#71717a;
+    --accent:#818cf8; --accent-d:#4f46e5;
+    --green:#34d399; --green-bg:#052e16; --green-border:#064e3b;
+    --blue:#60a5fa; --blue-bg:#0c1a2e; --blue-border:#1e3a5f;
+    --mono:'JetBrains Mono','Fira Code',monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;
+    --r:8px;
+  }
+  html { font-size: 14px; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; -webkit-font-smoothing: antialiased; }
+
+  nav {
+    display: flex; align-items: center; gap: 2px;
+    padding: 0 20px; height: 48px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(9,9,11,.9); backdrop-filter: blur(16px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .nav-logo { display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--text);text-decoration:none;margin-right:12px; }
+  nav a.nl { font-size:13px;color:var(--text3);padding:4px 10px;border-radius:var(--r);text-decoration:none;transition:color .15s,background .15s; }
+  nav a.nl:hover { color:var(--text);background:var(--bg2); }
+  .nav-sp { flex:1; }
+
+  /* Layout: sidebar + content */
+  .layout { display: flex; max-width: 1100px; margin: 0 auto; }
+
+  .sidebar {
+    width: 220px; flex-shrink: 0;
+    padding: 32px 0 80px 24px;
+    position: sticky; top: 48px; height: calc(100vh - 48px);
+    overflow-y: auto;
+  }
+  .sidebar-section { margin-bottom: 24px; }
+  .sidebar-label {
+    font-size: 11px; font-family: var(--mono); font-weight: 600;
+    color: var(--text3); letter-spacing: .08em; text-transform: uppercase;
+    margin-bottom: 6px; padding-left: 8px;
+  }
+  .sidebar a {
+    display: block; font-size: 13px; color: var(--text3);
+    padding: 4px 8px; border-radius: var(--r);
+    text-decoration: none; transition: color .12s, background .12s;
+    border-left: 2px solid transparent;
+  }
+  .sidebar a:hover { color: var(--text); background: var(--bg2); }
+  .sidebar a.active { color: var(--accent); border-left-color: var(--accent); background: rgba(129,140,248,.06); }
+
+  .content { flex: 1; padding: 40px 40px 80px 40px; min-width: 0; }
+
+  /* Typography */
+  h1 { font-size: 24px; font-weight: 700; letter-spacing: -.03em; margin-bottom: 8px; }
+  h2 {
+    font-size: 17px; font-weight: 600; letter-spacing: -.02em;
+    margin: 48px 0 12px; padding-top: 48px;
+    border-top: 1px solid var(--border); color: var(--text);
+  }
+  h2:first-of-type { margin-top: 32px; }
+  h3 { font-size: 13px; font-weight: 600; color: var(--text2); margin: 20px 0 8px; text-transform: uppercase; letter-spacing: .04em; font-family: var(--mono); }
+  p { font-size: 14px; line-height: 1.75; color: var(--text2); margin-bottom: 14px; }
+  ul { font-size: 14px; line-height: 1.75; color: var(--text2); padding-left: 18px; margin-bottom: 14px; }
+  li { margin-bottom: 4px; }
+  code {
+    font-family: var(--mono); font-size: 12px;
+    background: var(--bg2); border: 1px solid var(--border);
+    padding: 1px 6px; border-radius: 4px; color: var(--accent);
+  }
+  pre {
+    background: var(--bg1); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 16px;
+    font-family: var(--mono); font-size: 12px; color: #a5f3a5;
+    overflow-x: auto; margin-bottom: 16px; line-height: 1.65;
+    white-space: pre;
+  }
+  .lead { font-size: 15px; color: var(--text2); margin-bottom: 0; }
+
+  .method-badge {
+    display: inline-block; font-size: 11px; font-weight: 700;
+    font-family: var(--mono); padding: 2px 7px; border-radius: 4px;
+    margin-right: 4px; vertical-align: middle;
+  }
+  .GET  { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .POST { background: var(--blue-bg);  color: var(--blue);  border: 1px solid var(--blue-border); }
+
+  .callout {
+    background: var(--bg1); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--r); padding: 12px 16px;
+    font-size: 13px; color: var(--text2); margin-bottom: 16px;
+    line-height: 1.6;
+  }
+
+  footer { border-top:1px solid var(--border);padding:20px 24px;font-size:11px;font-family:var(--mono);color:var(--text3); }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/ui" class="nav-logo" style="text-decoration:none;">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+      <path d="M8 1L14.928 5V11L8 15L1.072 11V5L8 1Z" stroke="#818cf8" stroke-width="1.2"/>
+      <path d="M8 4L12 6.5V11.5L8 14L4 11.5V6.5L8 4Z" fill="#818cf8" opacity=".15"/>
+    </svg>
+    Cordon
+  </a>
+  <a href="/ui" class="nl">Overview</a>
+  <a href="/ui/chat" class="nl">Chat</a>
+  <a href="/ui/endpoints" class="nl">API</a>
+  <a href="/ui/docs" class="nl" style="color:var(--text);">Docs</a>
+  <div class="nav-sp"></div>
+</nav>
+
+<div class="layout">
+  <nav class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Getting Started</div>
+      <a href="#overview" class="active">Overview</a>
+      <a href="#auth">Authentication</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Endpoints</div>
+      <a href="#inference">Inference</a>
+      <a href="#health">Health</a>
+      <a href="#attestation">Attestation</a>
+      <a href="#models">Models</a>
+      <a href="#audit">Audit</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Reference</div>
+      <a href="#errors">Errors</a>
+    </div>
+  </nav>
+
+  <div class="content">
+    <h1>Cordon API</h1>
+    <p class="lead">v2.0.0 &mdash; Private Inference Engine</p>
+
+    <h2 id="overview">Overview</h2>
+    <p>Cordon is a privacy-preserving AI inference engine. Every request is processed inside a verified Trusted Execution Environment (TEE). Model weights are encrypted at rest with AES-256-GCM. Every inference event is written to an immutable, hash-chained audit log <em>before</em> the response is returned.</p>
+    <div class="callout">
+      Cordon is not an inference engine itself &mdash; it is a <strong>security and privacy layer</strong> that wraps any OpenAI-compatible backend (llama.cpp, vLLM, Ollama). The backend does the compute; Cordon provides attestation, encrypted weights, audit, and isolation.
+    </div>
+    <p>All endpoints are under <code>/v1/</code>. The base URL is the address Cordon is listening on, e.g. <code>http://localhost:8443</code>.</p>
+
+    <h2 id="auth">Authentication</h2>
+    <p>In development mode, pass your client ID in the <code>x-client-id</code> header. In production, mTLS client certificates are used &mdash; the client ID is extracted from the certificate CN field.</p>
+    <pre>x-client-id: my-app</pre>
+    <p>Unregistered clients receive a default policy: all models permitted, 60 req/min, 4096 max tokens per request. Register a named policy to restrict model access or set custom rate limits.</p>
+
+    <h2 id="inference">POST /v1/inference</h2>
+    <p>Run a chat completion through the full Cordon security pipeline: identity check &rarr; rate limit &rarr; audit pre-write &rarr; TEE inference &rarr; output filter &rarr; covert channel detection &rarr; timing normalization &rarr; audit post-write &rarr; signed response.</p>
+
+    <h3>Request</h3>
+    <pre>{
+  "model_id": "llama-3.2-3b-instruct-q4_k_m",
+  "messages": [
+    { "role": "system",    "content": "You are a helpful assistant." },
+    { "role": "user",      "content": "Hello!" }
+  ],
+  "inference_params": {
+    "max_tokens":         512,
+    "temperature":        0.7,
+    "top_p":              0.9,
+    "top_k":              0,
+    "stop":               [],
+    "repetition_penalty": 1.0
+  },
+  "session_id":      null,
+  "timeout_seconds": 120
+}</pre>
+
+    <h3>Response</h3>
+    <pre>{
+  "request_id":    "uuid",
+  "model_id":      "llama-3.2-3b-instruct-q4_k_m",
+  "client_id":     "my-app",
+  "usage": {
+    "prompt_tokens":     36,
+    "completion_tokens": 25,
+    "total_tokens":      61
+  },
+  "choices": [{
+    "index":         0,
+    "message":       { "role": "assistant", "content": "..." },
+    "finish_reason": "stop"
+  }],
+  "content_policy":  { "triggered": false, "rules_matched": [] },
+  "covert_channel":  { "anomaly_detected": false, "anomaly_score": 0.0 },
+  "signature": {
+    "enclave_key_id": "ephemeral-2b54a1b1",
+    "algorithm":      "ed25519",
+    "value":          "hex...",
+    "signed_fields":  ["request_id","output_hash","model_id","timestamp","mrenclave"]
+  },
+  "enclave_info": {
+    "tee_type":         "simulation",
+    "cordon_version":  "2.0.0",
+    "mrenclave":        "hex..."
+  }
+}</pre>
+    <p>The <code>signature</code> is an Ed25519 signature over <code>request_id + output_hash + model_id + timestamp + mrenclave</code>. Verify it against the enclave ephemeral key from the attestation report.</p>
+    <p>For multi-turn conversations, pass a <code>session_id</code> UUID to maintain KV cache context across requests. Sessions are isolated per client &mdash; cross-client session access returns 401.</p>
+
+    <h2 id="health">Health</h2>
+    <p><span class="method-badge GET">GET</span><code>/v1/health</code> &mdash; Basic liveness check, no auth required.</p>
+    <p><span class="method-badge GET">GET</span><code>/v1/health/detailed</code> &mdash; Full node status: TEE state, inference backend, active requests, latency percentiles, audit chain status, integrity monitor, and security alerts.</p>
+
+    <h2 id="attestation">Attestation</h2>
+    <p>Attestation lets clients verify the exact code running inside the TEE before sending sensitive data. The MRENCLAVE is a SHA-256 hash of the enclave binary &mdash; any code change produces a different value.</p>
+    <ul>
+      <li><span class="method-badge GET">GET</span><code>/v1/attestation</code> &mdash; Current attestation report with MRENCLAVE, PCR values, and combined hash.</li>
+      <li><span class="method-badge POST">POST</span><code>/v1/attestation/verify</code> &mdash; Submit a nonce; server returns a fresh report bound to that nonce (prevents replay attacks).</li>
+      <li><span class="method-badge POST">POST</span><code>/v1/attestation/refresh</code> &mdash; Trigger re-attestation.</li>
+    </ul>
+    <pre>POST /v1/attestation/verify
+{ "nonce": "your-random-nonce" }</pre>
+
+    <h2 id="models">Models</h2>
+    <p><span class="method-badge GET">GET</span><code>/v1/models</code> &mdash; Lists all encrypted model bundles in the store with their status.</p>
+    <p>Possible statuses: <code>encrypted</code> (on disk, not loaded), <code>ready</code> (decrypted and loaded), <code>tampered</code> (integrity check failed).</p>
+    <p>Models are provisioned offline using <code>cordon-provision encrypt</code> and placed in the bundle directory. The node discovers bundles on startup by scanning for <code>manifest.json</code> files. In dev mode with an HTTP backend, the <code>model_id</code> is passed directly to the backend and does not need to match a registered bundle.</p>
+
+    <h2 id="audit">Audit</h2>
+    <p>Every inference request generates two audit entries: one before processing (intake) and one after (completion with output hash). The log is append-only, hash-chained, and signed with an Ed25519 key generated at node startup.</p>
+    <ul>
+      <li><span class="method-badge GET">GET</span><code>/v1/audit/tail?n=10</code> &mdash; Last N log entries (max 1000).</li>
+      <li><span class="method-badge GET">GET</span><code>/v1/audit/verify</code> &mdash; Verify the entire chain integrity.</li>
+      <li><span class="method-badge POST">POST</span><code>/v1/audit/anchor</code> &mdash; Returns the current Merkle root for external anchoring.</li>
+    </ul>
+
+    <h2 id="errors">Errors</h2>
+    <p>All errors return a JSON body with an appropriate HTTP 4xx/5xx status:</p>
+    <pre>{
+  "error":      "error_code",
+  "message":    "Human readable description",
+  "request_id": "uuid or null"
+}</pre>
+    <p>Common error codes:</p>
+    <ul>
+      <li><code>auth_failed</code> &mdash; Invalid client ID, expired cert, or suspended client</li>
+      <li><code>rate_limited</code> &mdash; Too many requests or tokens per minute</li>
+      <li><code>inference_failed</code> &mdash; Backend unreachable or returned an error</li>
+      <li><code>content_policy_violation</code> &mdash; Output blocked by content filter</li>
+      <li><code>model_not_found</code> &mdash; Bundle ID not in model store</li>
+      <li><code>quarantined</code> &mdash; Node is in quarantine mode (tamper detected)</li>
+      <li><code>audit_write_failed</code> &mdash; Fatal: audit log write failed, request rejected</li>
+    </ul>
+  </div>
+</div>
+
+<footer>Cordon v2.0.0 &mdash; Private Inference Engine</footer>
+
+<script>
+// Highlight active sidebar link on scroll
+var sections = document.querySelectorAll('h2[id]');
+var links = document.querySelectorAll('.sidebar a');
+window.addEventListener('scroll', function(){
+  var pos = window.scrollY + 80;
+  var current = '';
+  sections.forEach(function(s){ if(s.offsetTop <= pos) current = s.id; });
+  links.forEach(function(l){
+    l.classList.toggle('active', l.getAttribute('href') === '#'+current);
+  });
+}, {passive:true});
+</script>
+</body>
+</html>

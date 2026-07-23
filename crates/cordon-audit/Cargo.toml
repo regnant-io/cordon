@@ -1,0 +1,19 @@
+[package]
+name = "cordon-audit"
+version = "2.0.0"
+edition = "2021"
+description = "Merkle-chained audit log for Cordon — append-only, client-verifiable"
+
+[dependencies]
+cordon-crypto = { path = "../cordon-crypto" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
