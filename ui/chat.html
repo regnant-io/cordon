@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cordon — Chat</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#09090b; --bg1:#111113; --bg2:#18181b;
+    --border:#27272a; --border2:#3f3f46;
+    --text:#fafafa; --text2:#a1a1aa; --text3:#71717a;
+    --accent:#818cf8; --accent-d:#4f46e5;
+    --green:#34d399; --mono:'JetBrains Mono','Fira Code',monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;
+    --r:8px;
+  }
+  html { font-size: 14px; }
+  body {
+    background: var(--bg); color: var(--text); font-family: var(--sans);
+    height: 100vh; display: flex; flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Nav */
+  nav {
+    display: flex; align-items: center; gap: 2px;
+    padding: 0 20px; height: 48px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    background: rgba(9,9,11,.9); backdrop-filter: blur(16px);
+  }
+  .nav-logo {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 600; color: var(--text);
+    text-decoration: none; margin-right: 12px;
+  }
+  nav a.nl {
+    font-size: 13px; color: var(--text3); padding: 4px 10px;
+    border-radius: var(--r); text-decoration: none; transition: color .15s, background .15s;
+  }
+  nav a.nl:hover { color: var(--text); background: var(--bg2); }
+  .nav-sp { flex: 1; }
+
+  /* Settings bar */
+  .settings {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 20px; border-bottom: 1px solid var(--border);
+    background: var(--bg1); flex-shrink: 0; flex-wrap: wrap;
+  }
+  .settings label {
+    font-size: 11px; font-family: var(--mono); color: var(--text3);
+    letter-spacing: .04em; white-space: nowrap;
+  }
+  .settings input, .settings select {
+    background: var(--bg2); border: 1px solid var(--border2);
+    color: var(--text); font-size: 12px; font-family: var(--mono);
+    padding: 5px 10px; border-radius: var(--r); outline: none;
+    transition: border-color .15s;
+  }
+  .settings input:focus, .settings select:focus { border-color: var(--accent); }
+  .settings input.wide { width: 220px; }
+  .settings input.narrow { width: 120px; }
+  .settings select { width: 100px; }
+  .sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+  .clr-btn {
+    margin-left: auto; font-size: 12px; font-family: var(--mono);
+    color: var(--text3); background: transparent; border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: var(--r); cursor: pointer; transition: all .15s;
+  }
+  .clr-btn:hover { color: var(--text); border-color: var(--border2); }
+
+  /* Messages */
+  .msgs-wrap {
+    flex: 1; overflow-y: auto; min-height: 0;
+    scroll-behavior: smooth;
+  }
+  .msgs-inner {
+    max-width: 760px; margin: 0 auto;
+    padding: 24px 20px 8px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  /* Bubbles */
+  .msg { display: flex; flex-direction: column; gap: 4px; }
+  .msg.user { align-items: flex-end; }
+  .msg.assistant { align-items: flex-start; }
+  .msg.system { align-items: center; }
+
+  .bubble {
+    max-width: 72%; padding: 10px 14px;
+    font-size: 14px; line-height: 1.65; word-break: break-word;
+    animation: fadeUp .18s ease;
+  }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+
+  .msg.user .bubble {
+    background: var(--accent-d);
+    color: #fff;
+    border-radius: 12px 12px 3px 12px;
+  }
+  .msg.assistant .bubble {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 12px 12px 12px 3px;
+  }
+  .msg.system .bubble {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text3);
+    font-size: 12px; font-family: var(--mono);
+    border-radius: var(--r);
+    padding: 6px 12px;
+    max-width: 100%;
+  }
+  .msg-meta {
+    font-size: 11px; font-family: var(--mono); color: var(--text3);
+    padding: 0 4px;
+  }
+
+  /* Typing indicator */
+  .typing-dots { display: flex; gap: 4px; padding: 4px 2px; }
+  .typing-dots span {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text3); animation: blink 1.4s infinite;
+  }
+  .typing-dots span:nth-child(2) { animation-delay: .2s; }
+  .typing-dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%,80%,100%{opacity:.2;} 40%{opacity:1;} }
+
+  /* Input area */
+  .input-area {
+    border-top: 1px solid var(--border);
+    background: var(--bg1); flex-shrink: 0;
+    padding: 12px 20px 16px;
+  }
+  .input-inner {
+    max-width: 760px; margin: 0 auto;
+    display: flex; gap: 10px; align-items: flex-end;
+  }
+  .input-inner textarea {
+    flex: 1; background: var(--bg2); border: 1px solid var(--border2);
+    color: var(--text); font-size: 14px; font-family: var(--sans);
+    padding: 10px 14px; border-radius: var(--r);
+    resize: none; outline: none; line-height: 1.5;
+    min-height: 42px; max-height: 160px;
+    transition: border-color .15s;
+  }
+  .input-inner textarea:focus { border-color: var(--accent); }
+  .input-inner textarea::placeholder { color: var(--text3); }
+  .send-btn {
+    width: 42px; height: 42px; border-radius: var(--r);
+    background: var(--accent-d); border: none; color: #fff;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; transition: background .15s, opacity .15s;
+  }
+  .send-btn:hover { background: #4338ca; }
+  .send-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .send-btn svg { pointer-events: none; }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/ui" class="nav-logo">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+      <path d="M8 1L14.928 5V11L8 15L1.072 11V5L8 1Z" stroke="#818cf8" stroke-width="1.2"/>
+      <path d="M8 4L12 6.5V11.5L8 14L4 11.5V6.5L8 4Z" fill="#818cf8" opacity=".15"/>
+    </svg>
+    Cordon
+  </a>
+  <a href="/ui" class="nl">Overview</a>
+  <a href="/ui/chat" class="nl" style="color:var(--text);">Chat</a>
+  <a href="/ui/endpoints" class="nl">API</a>
+  <a href="/ui/docs" class="nl">Docs</a>
+  <div class="nav-sp"></div>
+</nav>
+
+<div class="settings">
+  <label>MODEL</label>
+  <input id="modelId" class="wide" value="llama-3.2-3b-instruct-q4_k_m" spellcheck="false">
+  <div class="sep"></div>
+  <label>CLIENT</label>
+  <input id="clientId" class="narrow" value="test-client" spellcheck="false">
+  <div class="sep"></div>
+  <label>SYSTEM</label>
+  <input id="sysPrompt" class="wide" placeholder="System prompt (optional)" spellcheck="false">
+  <div class="sep"></div>
+  <label>TEMP</label>
+  <select id="tempSel">
+    <option value="0.1">0.1</option>
+    <option value="0.3">0.3</option>
+    <option value="0.7" selected>0.7</option>
+    <option value="1.0">1.0</option>
+  </select>
+  <label>TOKENS</label>
+  <select id="maxTok">
+    <option value="256">256</option>
+    <option value="512" selected>512</option>
+    <option value="1024">1024</option>
+    <option value="2048">2048</option>
+  </select>
+  <button class="clr-btn" onclick="clearChat()">Clear</button>
+</div>
+
+<div class="msgs-wrap" id="msgsWrap">
+  <div class="msgs-inner" id="msgs">
+    <div class="msg system">
+      <div class="bubble">Cordon ready &mdash; messages are processed through the full security pipeline</div>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <div class="input-inner">
+    <textarea id="inp" placeholder="Send a message…" rows="1" onkeydown="handleKey(event)"></textarea>
+    <button class="send-btn" id="sendBtn" onclick="send()" title="Send (Enter)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<script>
+var msgs = [];
+var g = function(id){ return document.getElementById(id); };
+function model(){ return g('modelId').value.trim() || 'llama-3.2-3b-instruct-q4_k_m'; }
+function client(){ return g('clientId').value.trim() || 'test-client'; }
+function temp(){ return parseFloat(g('tempSel').value); }
+function maxTok(){ return parseInt(g('maxTok').value); }
+function sysPrompt(){ return g('sysPrompt').value.trim(); }
+
+function handleKey(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} }
+
+function esc(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+function scrollBottom(){
+  var w=g('msgsWrap'); w.scrollTop=w.scrollHeight;
+}
+
+function addMsg(role, content, meta){
+  var wrap=document.createElement('div');
+  wrap.className='msg '+role;
+  var b=document.createElement('div');
+  b.className='bubble';
+  b.innerHTML=content;
+  wrap.appendChild(b);
+  if(meta){
+    var m=document.createElement('div');
+    m.className='msg-meta'; m.textContent=meta;
+    wrap.appendChild(m);
+  }
+  g('msgs').appendChild(wrap);
+  scrollBottom();
+  return wrap;
+}
+
+function showTyping(){ /* unused — streaming creates the bubble directly */ }
+function removeTyping(){ var e=g('typing'); if(e)e.remove(); }
+
+function clearChat(){
+  msgs=[];
+  g('msgs').innerHTML='<div class="msg system"><div class="bubble">Chat cleared</div></div>';
+}
+
+async function send(){
+  var inp=g('inp');
+  var text=inp.value.trim(); if(!text)return;
+  inp.value=''; inp.style.height='';
+  g('sendBtn').disabled=true;
+
+  var sp=sysPrompt();
+  var payload=[];
+  if(sp) payload.push({role:'system',content:sp});
+  msgs.forEach(function(m){payload.push(m);});
+  payload.push({role:'user',content:text});
+  msgs.push({role:'user',content:text});
+  addMsg('user', esc(text));
+
+  // Create assistant bubble immediately for streaming into
+  var wrap=document.createElement('div');
+  wrap.className='msg assistant';
+  var bubble=document.createElement('div');
+  bubble.className='bubble';
+  bubble.innerHTML='<div class="typing-dots"><span></span><span></span><span></span></div>';
+  wrap.appendChild(bubble);
+  g('msgs').appendChild(wrap);
+  scrollBottom();
+
+  var fullReply='';
+
+  try{
+    var r=await fetch('/v1/inference/stream',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-client-id':client()},
+      body:JSON.stringify({model_id:model(),messages:payload,inference_params:{temperature:temp(),max_tokens:maxTok()}})
+    });
+
+    if(!r.ok){
+      var errData=await r.json().catch(function(){return{message:'Unknown error'};});
+      bubble.innerHTML=esc('⚠ '+(errData.message||r.status));
+      wrap.className='msg system';
+    } else {
+      var reader=r.body.getReader();
+      var decoder=new TextDecoder();
+      var sseBuffer='';
+      var firstChunk=true;
+
+      while(true){
+        var result=await reader.read();
+        if(result.done) break;
+        sseBuffer+=decoder.decode(result.value,{stream:true});
+
+        var lines=sseBuffer.split('\n');
+        sseBuffer=lines.pop(); // keep incomplete line
+
+        for(var i=0;i<lines.length;i++){
+          var line=lines[i].trim();
+          if(!line.startsWith('data:')) continue;
+          var data=line.slice(5).trim();
+          if(!data) continue;
+
+          try{
+            var evt=JSON.parse(data);
+
+            // Check event type from preceding event: line
+            var evtType='';
+            if(i>0 && lines[i-1].startsWith('event:')){
+              evtType=lines[i-1].slice(6).trim();
+            }
+
+            if(evtType==='delta' && evt.delta){
+              if(firstChunk){ bubble.textContent=''; firstChunk=false; }
+              fullReply+=evt.delta;
+              bubble.innerHTML=esc(fullReply);
+              scrollBottom();
+            } else if(evtType==='done'){
+              var tok=evt.usage?evt.usage.total_tokens+' tokens \u00b7 '+evt.finish_reason:'';
+              var meta=document.createElement('div');
+              meta.className='msg-meta'; meta.textContent=tok;
+              wrap.appendChild(meta);
+              msgs.push({role:'assistant',content:fullReply});
+            } else if(evtType==='error'){
+              bubble.innerHTML=esc('⚠ '+(evt.error||'Stream error'));
+              wrap.className='msg system';
+            }
+          }catch(e){}
+        }
+      }
+    }
+  }catch(e){
+    bubble.innerHTML=esc('⚠ '+e.message);
+    wrap.className='msg system';
+  }
+
+  g('sendBtn').disabled=false;
+  inp.focus();
+}
+
+g('inp').addEventListener('input',function(){
+  this.style.height='auto';
+  this.style.height=Math.min(this.scrollHeight,160)+'px';
+});
+</script>
+</body>
+</html>

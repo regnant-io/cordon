@@ -1,0 +1,58 @@
+[Unit]
+Description=Cordon Private Inference Engine v2.0
+Documentation=https://docs.cordon.internal
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=cordon
+Group=cordon
+WorkingDirectory=/var/lib/cordon
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cordon
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no  # Required for JIT in inference runtimes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Environment
+Environment="RUST_LOG=info"
+Environment="CORDON_DATA_DIR=/var/lib/cordon"
+EnvironmentFile=-/etc/cordon/cordon.env
+
+# Start command
+ExecStart=/usr/local/bin/cordon serve \
+    --config /etc/cordon/cordon.toml \
+    --bind 0.0.0.0:8443 \
+    --data-dir /var/lib/cordon
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Graceful stop
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

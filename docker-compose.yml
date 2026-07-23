@@ -1,0 +1,84 @@
+version: "3.9"
+
+# Cordon v2.0 — Docker Compose deployment
+# For development and vault-mode testing only.
+# Dark/Island modes require physical hardware deployment.
+
+services:
+  # Main Cordon inference node
+  cordon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: cordon:2.0.0
+    container_name: cordon-node
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - cordon-audit:/var/lib/cordon/audit
+      - cordon-bundles:/var/lib/cordon/bundles
+      - ./deployment/docker/cordon-light.toml:/etc/cordon/cordon.toml:ro
+    environment:
+      - RUST_LOG=info
+      - CORDON_HSM_PIN=dev-only-pin
+    networks:
+      - cordon-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8443/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Local Prometheus metrics scraper (localhost-equivalent in container network)
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: cordon-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deployment/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"  # localhost only
+    networks:
+      - cordon-net
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.listen-address=0.0.0.0:9090"
+
+  # Grafana dashboard (LAN-only equivalent)
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: cordon-grafana
+    restart: unless-stopped
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deployment/docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:3000:3000"  # localhost only
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=cordon-dev
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_DOMAIN=localhost
+    networks:
+      - cordon-net
+    depends_on:
+      - prometheus
+
+networks:
+  cordon-net:
+    driver: bridge
+    internal: false  # Set to true for Island mode equivalent
+
+volumes:
+  cordon-audit:
+    driver: local
+  cordon-bundles:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
