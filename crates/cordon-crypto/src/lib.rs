@@ -6,8 +6,9 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-#![deny(clippy::unwrap_used)]
-#![deny(clippy::expect_used)]
+// Forbid unwrap/expect in production crypto code; allow them in unit tests.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
 
 pub mod error;
 pub mod hierarchy;

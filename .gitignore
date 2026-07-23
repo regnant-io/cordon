@@ -1,18 +1,22 @@
 /target/
 **/*.rs.bk
-Cargo.lock
 .env
+
+# NOTE: Cargo.lock IS committed — this is a binary/application workspace, so a
+# pinned lockfile gives reproducible builds and lets `cargo audit` run in CI.
 
 # Key material — never commit
 *.hex
 *.pem
 *.key
 sanctum-keys/
+cordon-keys/
 **/cmk*
 
 # Secrets
 .env
 *.env
+cordon.env
 sanctum.env
 
 # Logs
