@@ -1,0 +1,152 @@
+---
+# Cordon v2.0 — Ansible Deployment Playbook
+# Supports: vault, island, sovereign_cloud modes
+# Dark mode requires physical installation (no remote)
+
+- name: Deploy Cordon Node
+  hosts: cordon_nodes
+  become: yes
+  vars:
+    cordon_version: "2.0.0"
+    cordon_user: cordon
+    cordon_group: cordon
+    cordon_data_dir: /var/lib/cordon
+    cordon_config_dir: /etc/cordon
+    cordon_bin_dir: /usr/local/bin
+    deployment_mode: "{{ cordon_mode | default('vault') }}"
+
+  tasks:
+    - name: Verify deployment mode is not Dark (requires physical install)
+      fail:
+        msg: "Dark mode cannot be deployed remotely. Use physical installation procedure."
+      when: deployment_mode == "dark"
+
+    - name: Create cordon system user
+      user:
+        name: "{{ cordon_user }}"
+        group: "{{ cordon_group }}"
+        system: yes
+        create_home: yes
+        home: "{{ cordon_data_dir }}"
+        shell: /bin/false
+
+    - name: Create directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ cordon_user }}"
+        group: "{{ cordon_group }}"
+        mode: "0750"
+      loop:
+        - "{{ cordon_data_dir }}/audit"
+        - "{{ cordon_data_dir }}/bundles"
+        - "{{ cordon_data_dir }}/tls"
+        - "{{ cordon_data_dir }}/keys"
+        - "{{ cordon_config_dir }}"
+
+    - name: Set restrictive permissions on keys directory
+      file:
+        path: "{{ cordon_data_dir }}/keys"
+        mode: "0700"
+
+    - name: Copy Cordon binaries
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ cordon_bin_dir }}/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - { src: "dist/cordon", dest: "cordon" }
+        - { src: "dist/cordon-keygen", dest: "cordon-keygen" }
+        - { src: "dist/cordon-verify-log", dest: "cordon-verify-log" }
+        - { src: "dist/cordon-provision", dest: "cordon-provision" }
+
+    - name: Verify binary integrity (SHA-256)
+      shell: |
+        echo "{{ item.sha256 }}  {{ cordon_bin_dir }}/{{ item.name }}" | sha256sum -c -
+      loop: "{{ cordon_binary_hashes }}"
+      when: cordon_binary_hashes is defined
+
+    - name: Deploy configuration
+      template:
+        src: "templates/cordon-{{ deployment_mode }}.toml.j2"
+        dest: "{{ cordon_config_dir }}/cordon.toml"
+        owner: "{{ cordon_user }}"
+        group: "{{ cordon_group }}"
+        mode: "0640"
+
+    - name: Deploy TLS certificates
+      copy:
+        content: "{{ item.content }}"
+        dest: "{{ cordon_data_dir }}/tls/{{ item.name }}"
+        owner: "{{ cordon_user }}"
+        group: "{{ cordon_group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { name: "server.crt", content: "{{ tls_cert }}", mode: "0644" }
+        - { name: "server.key", content: "{{ tls_key }}", mode: "0600" }
+      when: tls_cert is defined
+      no_log: true  # Never log key material
+
+    - name: Install systemd service
+      template:
+        src: templates/cordon.service.j2
+        dest: /etc/systemd/system/cordon.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Configure iptables zero-egress (software layer)
+      iptables:
+        chain: OUTPUT
+        policy: DROP
+      when: deployment_mode in ['vault', 'island', 'sovereign_cloud']
+      ignore_errors: yes  # Hardware firewall is the authoritative control
+
+    - name: Allow loopback output
+      iptables:
+        chain: OUTPUT
+        out_interface: lo
+        jump: ACCEPT
+      when: deployment_mode in ['vault', 'island', 'sovereign_cloud']
+
+    - name: Allow established connections
+      iptables:
+        chain: OUTPUT
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+      when: deployment_mode in ['vault', 'island', 'sovereign_cloud']
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start Cordon
+      systemd:
+        name: cordon
+        enabled: yes
+        state: started
+
+    - name: Wait for Cordon health check
+      uri:
+        url: "http://localhost:8443/v1/health"
+        method: GET
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 3
+      until: health.status == 200
+
+    - name: Confirm node is healthy
+      fail:
+        msg: "Cordon node did not start healthy: {{ health.json }}"
+      when: health.json.status != 'healthy'
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "Cordon {{ cordon_version }} deployed successfully"
+          - "Mode: {{ deployment_mode }}"
+          - "Node ID: {{ health.json.node_id | default('unknown') }}"
+          - "Status: {{ health.json.status }}"

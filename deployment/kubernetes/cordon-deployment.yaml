@@ -1,0 +1,379 @@
+---
+# Cordon v2.0 — Kubernetes Deployment (Vault / Sovereign Cloud mode)
+# Requires: AMD SEV-SNP capable nodes (e.g., Azure DCasv5, GCP N2D)
+# NOTE: For Dark/Island modes, use bare-metal deployment — not Kubernetes.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cordon
+  labels:
+    app.kubernetes.io/managed-by: "cordon"
+    security.cordon/zero-egress: "enforced"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cordon-node
+  namespace: cordon
+  labels:
+    app: cordon
+
+---
+# Network policy: zero-egress enforcement at Kubernetes level
+# NOTE: hardware firewall is the authoritative control (§4.1)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cordon-zero-egress
+  namespace: cordon
+spec:
+  podSelector:
+    matchLabels:
+      app: cordon
+  policyTypes:
+    - Egress
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - port: 8443
+          protocol: TCP
+  egress: []  # Zero egress — no outbound connections permitted
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cordon-config
+  namespace: cordon
+data:
+  # Generated with `cordon default-config --mode vault`, then edited.
+  #
+  # Vault mode is enforced at startup: mTLS with a client CA, TPM measurements,
+  # and pinned expected measurements are all required, and the node refuses to
+  # boot without them. Capture the measurements from a node you trust with
+  # `cordon attest --pin` and paste them into [attestation.expected] below.
+  cordon.toml: |
+    mode = "vault"
+    node_id = "REPLACE_WITH_NODE_ID"
+    deployment_name = "cordon-k8s"
+    # Feeds every derived key. It must be stable across restarts and identical
+    # to the value used with cordon-keygen.
+    deployment_id = "REPLACE_WITH_DEPLOYMENT_ID"
+    log_level = "info"
+
+    [network]
+    bind_address = "0.0.0.0"
+    api_port = 8443
+    require_mtls = true
+    client_ca_path = "/etc/cordon/tls/client-ca.crt"
+    outbound_policy = "zero_egress"
+    hardware_firewall = "none"
+    smartnic_acl = false
+    inbound_whitelist = []
+    tls_cert_path = "/etc/cordon/tls/tls.crt"
+    tls_key_path = "/etc/cordon/tls/tls.key"
+
+    [tee]
+    preferred = "amd_sev_snp"
+    minimum_security_version = 3
+    re_attestation_interval_hours = 24
+    halt_on_attestation_failure = true
+    cache_partitioning = true
+
+    [attestation]
+    measurement_source = "tpm2"
+    halt_until_verified = true
+    interval_hours = 24
+
+    # REQUIRED in Vault mode. The node will not start until these are pinned.
+    #   cordon attest --pin
+    # [attestation.expected]
+    # mrenclave = "..."
+    # mrsigner  = "..."
+    # min_isv_svn = 0
+    # [attestation.expected.pcr_values]
+    # 0 = "sha256:..."
+    # 4 = "sha256:..."
+
+    [runtime]
+    backend = "supervised"
+    binary = "/usr/local/bin/llama-server"
+    model_path = "REPLACE_WITH_BUNDLE_ID_OR_GGUF_PATH"
+    model_dir = "/var/lib/cordon/models"
+    context_size = 8192
+    gpu_layers = 0
+    parallel_slots = 32
+    startup_timeout_seconds = 300
+    extra_args = []
+
+    [ui]
+    # Refused outside Light mode; stated here so the posture is explicit.
+    enabled = false
+    bind_address = "127.0.0.1"
+    port = 8478
+
+    [limits]
+    max_request_bytes = 1048576
+    max_messages = 256
+    max_prompt_chars = 262144
+    max_connections = 1024
+    tls_handshake_timeout_seconds = 15
+
+    [side_channel]
+    constant_time_enforcement = true
+    memory_zeroize_on_completion = true
+    response_size_padding = true
+
+    [side_channel.timing_normalization]
+    enabled = true
+    mode = "bucket"
+    bucket_ms = 100
+    fixed_floor_ms = 0
+
+    [hsm]
+    provider = "aws_cloud_hsm"
+    fips_level = 3
+    slot_id = 0
+    pin_env_var = "CORDON_HSM_PIN"
+
+    [boot]
+    tpm_required = true
+    tpm_version = "2.0"
+    secure_boot = true
+    dm_verity = true
+
+    [boot.pcr_policy]
+    required_pcrs = [0, 4, 7, 8, 11, 13]
+    expected_values = {}
+
+    [model_store]
+    path = "/var/lib/cordon/bundles"
+    # Plaintext weights are staged here during a model load. A memory-backed
+    # volume keeps them off persistent storage entirely.
+    staging_dir = "/dev/shm/cordon"
+    integrity_check_interval_minutes = 15
+    halt_on_tamper = true
+
+    [inference]
+    max_concurrent_requests = 32
+    default_timeout_seconds = 120
+    client_kv_cache_isolation = true
+    kv_cache_zero_on_session_end = true
+    multi_tenant = true
+    max_input_tokens = 32768
+    max_output_tokens = 4096
+
+    [audit]
+    log_path = "/var/lib/cordon/audit"
+    log_format = "jsonl"
+    export_method = "operator_pull"
+    retention_days = 365
+    signing_key_from_enclave = true
+
+    [updates]
+    source = "mgmt_channel"
+    require_vendor_signature = true
+    require_client_signature = true
+    staged_rollout = true
+    auto_apply = false
+
+    [sustained_attack]
+    auth_failure_threshold_per_minute = 10
+    global_failure_threshold_per_minute = 50
+    covert_channel_score_threshold = 0.7
+    quarantine_on_critical = true
+    replay_probe_threshold = 20
+
+    client_registry_path = "/etc/cordon/clients.json"
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cordon
+  namespace: cordon
+  labels:
+    app: cordon
+    version: "2.0.0"
+spec:
+  serviceName: cordon
+  replicas: 1  # Scale via HA deployment — each node independently attested
+  selector:
+    matchLabels:
+      app: cordon
+  template:
+    metadata:
+      labels:
+        app: cordon
+        version: "2.0.0"
+      annotations:
+        # AMD SEV-SNP annotation (Azure/GCP specific)
+        "confidentialcomputing.azure.com/type": "SevSnp"
+    spec:
+      serviceAccountName: cordon-node
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cordon
+          image: cordon:2.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: api
+              containerPort: 8443
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: CORDON_HSM_PIN
+              valueFrom:
+                secretKeyRef:
+                  name: cordon-secrets
+                  key: hsm-pin
+            # The Client Master Key is read from a file on a memory-backed
+            # volume, never from the environment.
+            - name: CORDON_CMK_FILE
+              value: /run/cordon/cmk
+            - name: CORDON_LLAMA_SERVER
+              value: /usr/local/bin/llama-server
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cordon
+              readOnly: true
+            - name: tls
+              mountPath: /etc/cordon/tls
+              readOnly: true
+            - name: audit
+              mountPath: /var/lib/cordon/audit
+            - name: bundles
+              mountPath: /var/lib/cordon/bundles
+            # Plaintext weights are staged here for the duration of a model
+            # load. Memory-backed, so they never reach persistent storage.
+            - name: staging
+              mountPath: /dev/shm/cordon
+            # The Client Master Key, mounted read-only from a Secret onto a
+            # memory-backed volume.
+            - name: cmk
+              mountPath: /run/cordon
+              readOnly: true
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "64Gi"
+              cpu: "16"
+          # /v1/health is the only unauthenticated route, and it is served over
+          # TLS like everything else on this port.
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          # Loading a large model can take minutes. A startup probe keeps the
+          # liveness probe from restarting the pod mid-load.
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: 8443
+              scheme: HTTPS
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: cordon-config
+        - name: tls
+          secret:
+            secretName: cordon-tls
+            defaultMode: 0400
+        - name: cmk
+          secret:
+            secretName: cordon-cmk
+            defaultMode: 0400
+        - name: staging
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: audit
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: "encrypted-ssd"
+        resources:
+          requests:
+            storage: 50Gi
+    - metadata:
+        name: bundles
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: "encrypted-ssd"
+        resources:
+          requests:
+            storage: 500Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cordon
+  namespace: cordon
+  labels:
+    app: cordon
+spec:
+  type: ClusterIP
+  selector:
+    app: cordon
+  ports:
+    - name: api
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+
+---
+# Metrics
+#
+# Cordon serves /metrics only to a peer on loopback, and that restriction is not
+# relaxed for cluster-internal traffic: Prometheus output names clients, models,
+# and traffic volumes. A ServiceMonitor pointed at this Service would therefore
+# be refused with 403.
+#
+# Scrape it from a sidecar in this pod instead. Containers in a pod share a
+# network namespace, so a sidecar reaching 127.0.0.1:8443 is a loopback peer
+# and the restriction holds. Add to the StatefulSet's `containers`:
+#
+#   - name: metrics-relay
+#     image: nginx:alpine
+#     ports:
+#       - name: metrics
+#         containerPort: 9090
+#     volumeMounts:
+#       - name: metrics-relay-config
+#         mountPath: /etc/nginx/conf.d
+#
+# with an nginx config that proxies /metrics to https://127.0.0.1:8443/metrics,
+# then point a ServiceMonitor at the `metrics` port.

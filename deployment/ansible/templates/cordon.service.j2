@@ -1,0 +1,103 @@
+[Unit]
+Description=Cordon — confidential inference control plane
+Documentation=https://github.com/cordon-project/cordon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cordon
+Group=cordon
+WorkingDirectory=/var/lib/cordon
+
+# ── Sandboxing ─────────────────────────────────────────────────────────────
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Cordon listens on TCP and supervises a child on loopback. It needs no other
+# address families.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# Writable state: audit log, model store, and the staging directory where a
+# bundle is decrypted during a model load.
+ReadWritePaths=/var/lib/cordon
+
+# The Client Master Key lives on a tmpfs the operator populates before start.
+# Read-only here: the node needs to read it, never to write it.
+ReadOnlyPaths=/run/cordon
+
+{% if cordon_tpm_required | default(false) %}
+# TPM access for hardware measurements. PrivateDevices would hide it.
+PrivateDevices=no
+DeviceAllow=/dev/tpmrm0 rw
+DeviceAllow=/dev/tpm0 rw
+SupplementaryGroups=tss
+{% else %}
+PrivateDevices=yes
+{% endif %}
+
+# Model runtimes JIT-compile kernels, so W^X cannot be enforced here.
+MemoryDenyWriteExecute=no
+
+# ── Resource limits ────────────────────────────────────────────────────────
+LimitNOFILE=65536
+LimitNPROC=4096
+{% if cordon_memory_max is defined %}
+MemoryMax={{ cordon_memory_max }}
+{% endif %}
+
+# ── Environment ────────────────────────────────────────────────────────────
+Environment="RUST_LOG={{ cordon_log_level | default('info') }}"
+Environment="CORDON_CMK_FILE=/run/cordon/cmk"
+Environment="CORDON_CLIENT_ID={{ cordon_key_principal | default('operator') }}"
+Environment="CORDON_LLAMA_SERVER=/usr/local/bin/llama-server"
+{% if cordon_tpm_required | default(false) %}
+Environment="CORDON_TPM_AK_CTX=/var/lib/cordon/tpm/ak.ctx"
+{% endif %}
+# Anything else the operator needs. Never put the master key here — the
+# environment is readable by every child process.
+EnvironmentFile=-/etc/cordon/cordon.env
+
+# ── Start ──────────────────────────────────────────────────────────────────
+# The configuration decides the security posture; the node refuses to start if
+# the posture its mode claims cannot be delivered.
+ExecStart=/usr/local/bin/cordon serve \
+    --config /etc/cordon/cordon.toml \
+    --bind {{ cordon_bind | default('0.0.0.0:8443') }} \
+    --data-dir /var/lib/cordon
+
+# ── Lifecycle ──────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+# SIGTERM triggers a graceful shutdown: connections drain, the model runtime is
+# stopped, and staged plaintext weights are erased. Loading a large model can
+# take minutes, so allow time for it.
+KillSignal=SIGTERM
+TimeoutStartSec=600
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

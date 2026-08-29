@@ -1,0 +1,41 @@
+# Build output
+/target/
+**/*.rs.bk
+
+# Cargo.lock IS committed: this is an application workspace, so a pinned
+# lockfile gives reproducible builds and lets `cargo audit` check what actually
+# ships.
+
+# ── Key material — never commit ────────────────────────────────────────────
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.hex
+**/cmk
+**/cmk*
+cordon-keys/
+secrets/
+
+# ── Secrets ────────────────────────────────────────────────────────────────
+.env
+*.env
+
+# ── Runtime state ──────────────────────────────────────────────────────────
+# Audit logs, model weights, and decrypted staging files. None of this belongs
+# in version control, and some of it is large.
+/data/
+*.jsonl
+*.gguf
+*.safetensors
+*.staged
+*.partial
+
+# ── Editors and platforms ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

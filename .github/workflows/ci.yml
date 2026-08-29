@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Public items are documented, and intra-doc links resolve.
+      - name: rustdoc
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Cordon is a security control plane, so a handful of properties are worth
+  # asserting about the source itself rather than only about its behaviour.
+  invariants:
+    name: Source invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: forbid(unsafe_code) is set in every crate
+        run: |
+          for lib in crates/*/src/lib.rs; do
+            grep -q '#!\[forbid(unsafe_code)\]' "$lib" \
+              || { echo "::error file=$lib::missing #![forbid(unsafe_code)]"; exit 1; }
+          done
+
+      - name: No panicking calls in request-handling code
+        run: |
+          # Test modules may panic; production request paths may not. Scanning
+          # each file only up to its `#[cfg(test)]` marker keeps this simple and
+          # avoids depending on a Rust parser in CI.
+          found=0
+          for f in crates/cordon-api/src/*.rs                    crates/cordon-core/src/*.rs                    crates/cordon-core/src/runtime/*.rs; do
+            hits=$(awk '/^#\[cfg\(test\)\]/ { exit } /\.unwrap\(\)|\.expect\(|panic!\(|unreachable!\(/ { print FILENAME ":" NR ": " $0 }' "$f")
+            if [ -n "$hits" ]; then
+              echo "$hits"
+              found=1
+            fi
+          done
+          if [ "$found" = "1" ]; then
+            echo "::error::panicking call outside test code — return an error instead"
+            exit 1
+          fi
+
+      - name: The operator console loads nothing from the network
+        run: |
+          if grep -nE 'src="https?:|href="https?:|@import' ui/console.html; then
+            echo "::error file=ui/console.html::console must be self-contained"
+            exit 1
+          fi
