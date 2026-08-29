@@ -375,8 +375,19 @@ own it.
 cordon-keygen generate --deployment-id <deployment-id> --client-id operator
 ```
 
-This prints the CMK and the public halves of the derived keys. Store the CMK in
-an HSM. Give the node access to it by file:
+This writes the CMK to `./cordon-keys/cmk.hex` with owner-only permissions and
+prints the public halves — `K_log`, `K_admin`, and `K_enclave`. The CMK itself
+is not printed unless you pass `--print-cmk`: a key echoed to a terminal
+survives in scrollback and in CI logs.
+
+Recover the public keys later with:
+
+```bash
+cordon-keygen public --cmk-file /run/cordon/cmk \
+  --deployment-id <id> --client-id operator
+```
+
+Store the CMK in an HSM. Give the node access to it by file:
 
 ```bash
 install -m 600 /dev/null /run/cordon/cmk       # on a tmpfs
@@ -470,13 +481,17 @@ to trust the node. Check them yourself.
 
 ```bash
 cordon-verify-log \
-  --log-dir /var/lib/cordon/audit \
-  --deployment-id <id> \
-  --verifying-key <k_log_pub from cordon-keygen>
+  --log /var/lib/cordon/audit \
+  --key <K_log, from `cordon-keygen public`> \
+  --deployment-id <id>
 ```
 
 This recomputes every hash and checks every signature against the key **you**
 derived from the CMK. It does not contact the node.
+
+It exits `0` when the chain verifies and `1` when it does not, and on failure it
+names the entries that no longer match — so you learn what was altered, not
+merely that something was.
 
 ### A response signature
 
