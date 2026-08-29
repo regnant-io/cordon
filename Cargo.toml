@@ -1,0 +1,83 @@
+[workspace]
+members = [
+    "crates/cordon-core",
+    "crates/cordon-crypto",
+    "crates/cordon-audit",
+    "crates/cordon-api",
+    "crates/cordon-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/cordon-project/cordon"
+homepage = "https://github.com/cordon-project/cordon"
+authors = ["The Cordon Authors"]
+keywords = ["inference", "confidential-computing", "attestation", "audit", "llm"]
+categories = ["cryptography", "network-programming"]
+
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+zeroize = { version = "1.7", features = ["derive"] }
+ring = "0.17"
+sha2 = "0.10"
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
+x25519-dalek = "2.0"
+rand = "0.8"
+rand_core = { version = "0.6", features = ["getrandom"] }
+hex = "0.4"
+base64 = "0.21"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.4", features = ["derive"] }
+axum = { version = "0.7", features = ["json", "macros"] }
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "timeout", "limit", "set-header"] }
+hyper = { version = "1.0", features = ["full"] }
+rustls = "0.22"
+tokio-rustls = "0.25"
+rustls-pemfile = "2.0"
+rcgen = "0.12"
+config = "0.13"
+toml = "0.8"
+dirs = "5.0"
+parking_lot = "0.12"
+dashmap = "5.5"
+prometheus = { version = "0.13", features = ["process"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"], default-features = false }
+tempfile = "3.9"
+regex = "1.10"
+futures = "0.3"
+async-trait = "0.1"
+x509-parser = "0.16"
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+eventsource-stream = "0.2"
+indicatif = "0.17"
+url = "2.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.release-with-debug]
+inherits = "release"
+strip = "none"
+debug = true
+
+

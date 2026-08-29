@@ -1,0 +1,18 @@
+# Normalise line endings in the repository; check out native.
+* text=auto
+
+*.rs      text diff=rust
+*.toml    text
+*.md      text
+*.yml     text
+*.yaml    text
+*.html    text
+*.j2      text
+*.tf      text
+Dockerfile text
+
+# Never normalise binary content.
+*.gguf          binary
+*.safetensors   binary
+*.png           binary
+*.jpg           binary

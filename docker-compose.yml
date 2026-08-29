@@ -1,0 +1,97 @@
+# Cordon — local stack.
+#
+# Development and evaluation. Island and Dark modes require hardware this file
+# cannot provide, and Vault requires a real HSM and client CA.
+#
+# Before first run, fetch a model into the models volume:
+#
+#     docker compose run --rm cordon pull HuggingFaceTB/SmolLM2-360M-Instruct-GGUF \
+#         --model-dir /var/lib/cordon/models
+#
+# then set runtime.model_path in deployment/configs/cordon-light.toml.
+
+services:
+  cordon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: cordon:2.0.0
+    container_name: cordon-node
+    restart: unless-stopped
+    ports:
+      # The API. The model runtime stays on loopback inside the container and is
+      # deliberately not published — Cordon is the only way in.
+      - "127.0.0.1:8443:8443"
+      # Prometheus shares this namespace, so its port is published here.
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - cordon-audit:/var/lib/cordon/audit
+      - cordon-bundles:/var/lib/cordon/bundles
+      - cordon-models:/var/lib/cordon/models
+      - ./deployment/configs/cordon-light.toml:/etc/cordon/cordon.toml:ro
+      # Mount a Client Master Key to make audit and response signatures
+      # independently verifiable:
+      # - ./secrets/cmk:/run/cordon/cmk:ro
+    environment:
+      RUST_LOG: info
+      # CORDON_CMK_FILE: /run/cordon/cmk
+    networks: [cordon]
+    # A model runtime holds the whole model resident; size this for your model.
+    mem_limit: 8g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8443/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: cordon-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deployment/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # Cordon refuses /metrics from any peer that is not on loopback, and that
+    # rule is not relaxed for containers. Sharing the node's network namespace
+    # lets Prometheus scrape 127.0.0.1 and keeps the restriction intact.
+    # Port 9090 is published by the cordon service as a result.
+    network_mode: "service:cordon"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    depends_on:
+      cordon:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: cordon-grafana
+    restart: unless-stopped
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deployment/docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Development only. Set a real password before exposing this anywhere.
+      GF_SECURITY_ADMIN_PASSWORD: cordon-dev
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    networks: [cordon]
+    depends_on: [prometheus]
+
+networks:
+  cordon:
+    driver: bridge
+
+volumes:
+  cordon-audit:
+  cordon-bundles:
+  cordon-models:
+  prometheus-data:
+  grafana-data:
