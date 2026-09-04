@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cordon — API Explorer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#09090b; --bg1:#111113; --bg2:#18181b;
+    --border:#27272a; --border2:#3f3f46;
+    --text:#fafafa; --text2:#a1a1aa; --text3:#71717a;
+    --accent:#818cf8; --accent-d:#4f46e5;
+    --green:#34d399; --green-bg:#052e16; --green-border:#064e3b;
+    --blue:#60a5fa; --blue-bg:#0c1a2e; --blue-border:#1e3a5f;
+    --mono:'JetBrains Mono','Fira Code',monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;
+    --r:8px;
+  }
+  html { font-size: 14px; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; -webkit-font-smoothing: antialiased; }
+
+  nav {
+    display: flex; align-items: center; gap: 2px;
+    padding: 0 20px; height: 48px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(9,9,11,.9); backdrop-filter: blur(16px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .nav-logo { display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--text);text-decoration:none;margin-right:12px; }
+  nav a.nl { font-size:13px;color:var(--text3);padding:4px 10px;border-radius:var(--r);text-decoration:none;transition:color .15s,background .15s; }
+  nav a.nl:hover { color:var(--text);background:var(--bg2); }
+  .nav-sp { flex:1; }
+
+  .page { max-width: 900px; margin: 0 auto; padding: 32px 24px 80px; }
+
+  .page-header { margin-bottom: 28px; }
+  .page-header h1 { font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin-bottom: 4px; }
+  .page-header p { font-size: 13px; color: var(--text3); }
+
+  .toolbar {
+    display: flex; gap: 8px; align-items: center;
+    margin-bottom: 24px; flex-wrap: wrap;
+  }
+  .toolbar label { font-size: 11px; font-family: var(--mono); color: var(--text3); letter-spacing: .04em; }
+  .toolbar input {
+    background: var(--bg2); border: 1px solid var(--border2);
+    color: var(--text); font-size: 12px; font-family: var(--mono);
+    padding: 6px 10px; border-radius: var(--r); outline: none; width: 160px;
+    transition: border-color .15s;
+  }
+  .toolbar input:focus { border-color: var(--accent); }
+
+  .group { margin-bottom: 32px; }
+  .group-label {
+    font-size: 11px; font-family: var(--mono); font-weight: 600;
+    color: var(--text3); letter-spacing: .08em; text-transform: uppercase;
+    margin-bottom: 8px; padding-left: 2px;
+  }
+
+  .ep {
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    overflow: hidden;
+    margin-bottom: 6px;
+    background: var(--bg1);
+  }
+  .ep-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 16px; cursor: pointer; user-select: none;
+    transition: background .12s;
+  }
+  .ep-head:hover { background: var(--bg2); }
+
+  .method {
+    font-size: 11px; font-weight: 700; font-family: var(--mono);
+    padding: 2px 7px; border-radius: 4px; min-width: 42px;
+    text-align: center; letter-spacing: .02em;
+  }
+  .GET  { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .POST { background: var(--blue-bg);  color: var(--blue);  border: 1px solid var(--blue-border); }
+
+  .ep-path { font-family: var(--mono); font-size: 13px; color: var(--text); }
+  .ep-desc { font-size: 12px; color: var(--text3); margin-left: auto; }
+  .chevron {
+    font-size: 10px; color: var(--text3); margin-left: 8px;
+    transition: transform .2s; flex-shrink: 0;
+  }
+  .ep-head.open .chevron { transform: rotate(180deg); }
+
+  .ep-body { display: none; border-top: 1px solid var(--border); padding: 16px; }
+  .ep-body.open { display: block; }
+
+  .ep-body label {
+    display: block; font-size: 11px; font-family: var(--mono);
+    color: var(--text3); letter-spacing: .04em; margin-bottom: 6px;
+  }
+  .ep-body textarea {
+    width: 100%; background: var(--bg); border: 1px solid var(--border2);
+    color: #a5f3a5; font-family: var(--mono); font-size: 12px;
+    padding: 10px 12px; border-radius: var(--r); resize: vertical; outline: none;
+    line-height: 1.6; transition: border-color .15s;
+  }
+  .ep-body textarea:focus { border-color: var(--accent); }
+
+  .run-btn {
+    margin-top: 10px; padding: 6px 14px;
+    background: var(--accent-d); color: #fff; border: none;
+    border-radius: var(--r); font-size: 12px; font-family: var(--mono);
+    cursor: pointer; transition: background .15s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .run-btn:hover { background: #4338ca; }
+
+  .resp {
+    display: none; margin-top: 10px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 12px;
+    font-family: var(--mono); font-size: 12px; color: #a5f3a5;
+    white-space: pre-wrap; max-height: 360px; overflow-y: auto;
+    line-height: 1.6;
+  }
+  .resp.show { display: block; }
+  .resp.err { color: #f87171; }
+
+  footer { border-top:1px solid var(--border);padding:20px 24px;font-size:11px;font-family:var(--mono);color:var(--text3); }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/ui" class="nav-logo" style="text-decoration:none;">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+      <path d="M8 1L14.928 5V11L8 15L1.072 11V5L8 1Z" stroke="#818cf8" stroke-width="1.2"/>
+      <path d="M8 4L12 6.5V11.5L8 14L4 11.5V6.5L8 4Z" fill="#818cf8" opacity=".15"/>
+    </svg>
+    Cordon
+  </a>
+  <a href="/ui" class="nl">Overview</a>
+  <a href="/ui/chat" class="nl">Chat</a>
+  <a href="/ui/endpoints" class="nl" style="color:var(--text);">API</a>
+  <a href="/ui/docs" class="nl">Docs</a>
+  <div class="nav-sp"></div>
+</nav>
+
+<div class="page">
+  <div class="page-header">
+    <h1>API Explorer</h1>
+    <p>Expand any endpoint to inspect its schema and run live requests against the node.</p>
+  </div>
+
+  <div class="toolbar">
+    <label>CLIENT&nbsp;ID</label>
+    <input id="gClient" value="test-client" spellcheck="false">
+  </div>
+
+  <div class="group">
+    <div class="group-label">Health</div>
+    <div class="ep">
+      <div class="ep-head" id="h-hb" onclick="tog('hb')">
+        <span class="method GET">GET</span>
+        <span class="ep-path">/v1/health</span>
+        <span class="ep-desc">Basic liveness check</span>
+        <span class="chevron" id="c-hb">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-hb">
+        <button class="run-btn" onclick="run('hb','GET','/v1/health',null)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-hb"></pre>
+      </div>
+    </div>
+    <div class="ep">
+      <div class="ep-head" id="h-hd" onclick="tog('hd')">
+        <span class="method GET">GET</span>
+        <span class="ep-path">/v1/health/detailed</span>
+        <span class="ep-desc">Full node status</span>
+        <span class="chevron" id="c-hd">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-hd">
+        <button class="run-btn" onclick="run('hd','GET','/v1/health/detailed',null)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-hd"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Inference</div>
+    <div class="ep">
+      <div class="ep-head" id="h-inf" onclick="tog('inf')">
+        <span class="method POST">POST</span>
+        <span class="ep-path">/v1/inference</span>
+        <span class="ep-desc">Run a chat completion</span>
+        <span class="chevron" id="c-inf">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-inf">
+        <label>REQUEST BODY</label>
+        <textarea id="rb-inf" rows="7">{
+  "model_id": "llama-3.2-3b-instruct-q4_k_m",
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ],
+  "inference_params": {
+    "temperature": 0.7,
+    "max_tokens": 512
+  }
+}</textarea>
+        <button class="run-btn" onclick="run('inf','POST','/v1/inference','rb-inf')">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-inf"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Attestation</div>
+    <div class="ep">
+      <div class="ep-head" id="h-atg" onclick="tog('atg')">
+        <span class="method GET">GET</span>
+        <span class="ep-path">/v1/attestation</span>
+        <span class="ep-desc">Current attestation report</span>
+        <span class="chevron" id="c-atg">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-atg">
+        <button class="run-btn" onclick="run('atg','GET','/v1/attestation',null)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-atg"></pre>
+      </div>
+    </div>
+    <div class="ep">
+      <div class="ep-head" id="h-atv" onclick="tog('atv')">
+        <span class="method POST">POST</span>
+        <span class="ep-path">/v1/attestation/verify</span>
+        <span class="ep-desc">Verify with nonce</span>
+        <span class="chevron" id="c-atv">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-atv">
+        <label>REQUEST BODY</label>
+        <textarea id="rb-atv" rows="3">{"nonce": "my-random-nonce-12345"}</textarea>
+        <button class="run-btn" onclick="run('atv','POST','/v1/attestation/verify','rb-atv')">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-atv"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Models</div>
+    <div class="ep">
+      <div class="ep-head" id="h-mdl" onclick="tog('mdl')">
+        <span class="method GET">GET</span>
+        <span class="ep-path">/v1/models</span>
+        <span class="ep-desc">List registered bundles</span>
+        <span class="chevron" id="c-mdl">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-mdl">
+        <button class="run-btn" onclick="run('mdl','GET','/v1/models',null)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-mdl"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Audit</div>
+    <div class="ep">
+      <div class="ep-head" id="h-aut" onclick="tog('aut')">
+        <span class="method GET">GET</span>
+        <span class="ep-path">/v1/audit/tail?n=5</span>
+        <span class="ep-desc">Last N log entries</span>
+        <span class="chevron" id="c-aut">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-aut">
+        <button class="run-btn" onclick="run('aut','GET','/v1/audit/tail?n=5',null)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-aut"></pre>
+      </div>
+    </div>
+    <div class="ep">
+      <div class="ep-head" id="h-auv" onclick="tog('auv')">
+        <span class="method GET">GET</span>
+        <span class="ep-path">/v1/audit/verify</span>
+        <span class="ep-desc">Verify chain integrity</span>
+        <span class="chevron" id="c-auv">&#x25BE;</span>
+      </div>
+      <div class="ep-body" id="b-auv">
+        <button class="run-btn" onclick="run('auv','GET','/v1/audit/verify',null)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <pre class="resp" id="r-auv"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>Cordon &mdash; API Explorer</footer>
+
+<script>
+function tog(id){
+  var b=document.getElementById('b-'+id);
+  var h=document.getElementById('h-'+id);
+  var c=document.getElementById('c-'+id);
+  var open=b.classList.toggle('open');
+  h.classList.toggle('open',open);
+  c.style.transform=open?'rotate(180deg)':'';
+}
+function client(){ return document.getElementById('gClient').value||'test-client'; }
+async function run(id,method,path,bodyId){
+  var r=document.getElementById('r-'+id);
+  r.classList.add('show'); r.classList.remove('err');
+  r.textContent='Loading\u2026';
+  var opts={method:method,headers:{'Content-Type':'application/json','x-client-id':client()}};
+  if(bodyId){var b=document.getElementById(bodyId);if(b&&b.value.trim())opts.body=b.value.trim();}
+  try{
+    var res=await fetch(path,opts);
+    var txt=await res.text();
+    if(!res.ok) r.classList.add('err');
+    try{r.textContent=JSON.stringify(JSON.parse(txt),null,2);}catch(e){r.textContent=txt;}
+  }catch(e){r.classList.add('err');r.textContent='\u26A0 '+e.message;}
+}
+</script>
+</body>
+</html>
