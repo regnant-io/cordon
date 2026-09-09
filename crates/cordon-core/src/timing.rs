@@ -98,39 +98,15 @@ impl TimingNormalizer {
     }
 }
 
-/// Pad a response body to a consistent size (prevents length-based side-channels)
+/// # Response size
 ///
-/// In high-assurance modes, responses are padded to the next power-of-two
-/// length. The padding is stripped by the client SDK.
-pub fn pad_response(response: &str, enabled: bool) -> (String, usize) {
-    if !enabled {
-        return (response.to_string(), 0);
-    }
-
-    let len = response.len();
-    if len == 0 {
-        return (response.to_string(), 0);
-    }
-
-    // Next power of 2 at least 64 bytes apart
-    let target = next_padded_length(len);
-    let padding_len = target - len;
-
-    // Use space + null padding marker (stripped by client)
-    let mut padded = response.to_string();
-    // Padding marker: \x00 repeated to fill to target length
-    // Client strips everything after the first \x00
-    padded.push('\x00');
-    padded.extend(std::iter::repeat(' ').take(padding_len.saturating_sub(1)));
-
-    (padded, padding_len)
-}
-
-/// Compute the next padded length (nearest multiple of 256, at least target)
-fn next_padded_length(len: usize) -> usize {
-    let step = 256;
-    ((len / step) + 1) * step
-}
+/// Response *length* is a side channel this module does not close. An earlier
+/// version carried a `pad_response` helper and a `response_size_padding`
+/// configuration flag; nothing called the helper, so the flag described a
+/// defence that did not exist. Both are gone rather than left to imply
+/// otherwise. Padding a streamed response is not straightforward — the length
+/// is revealed as it is produced — and doing it properly means deciding on a
+/// bucket scheme and applying it on both paths.
 
 #[cfg(test)]
 mod tests {
@@ -177,14 +153,5 @@ mod tests {
         };
         let normalizer = TimingNormalizer::new(config);
         assert_eq!(normalizer.target_ms(123), 123);
-    }
-
-    #[test]
-    fn test_pad_response() {
-        let (padded, padding) = pad_response("Hello", true);
-        assert!(padded.len() >= 256);
-        assert!(padding > 0);
-        // Original content preserved at start
-        assert!(padded.starts_with("Hello\x00"));
     }
 }

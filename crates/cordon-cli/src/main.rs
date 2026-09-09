@@ -699,6 +699,31 @@ fn print_default_config(mode: &str) -> Result<()> {
         config.inference.multi_tenant = mode != DeploymentMode::Dark;
         config.hsm.fips_level = if mode == DeploymentMode::Dark { 4 } else { 3 };
         config.client_registry_path = Some(PathBuf::from("/etc/cordon/clients.json"));
+
+        // Sovereign Cloud pulls models; the rest are air-gapped and refuse to
+        // start while egress is permitted. A template that would be rejected
+        // on first use is worse than no template.
+        config.network.outbound_policy = if mode == DeploymentMode::SovereignCloud {
+            cordon_core::config::OutboundPolicy::Restricted
+        } else {
+            cordon_core::config::OutboundPolicy::ZeroEgress
+        };
+
+        // Vault, Island and Dark are documented as normalising response
+        // latency, so the template does.
+        if mode != DeploymentMode::SovereignCloud {
+            config.side_channel.timing_normalization =
+                cordon_core::config::TimingNormalizationConfig {
+                    enabled: true,
+                    mode: if mode == DeploymentMode::Dark {
+                        cordon_core::config::TimingMode::FixedFloor
+                    } else {
+                        cordon_core::config::TimingMode::Bucket
+                    },
+                    bucket_ms: 100,
+                    fixed_floor_ms: 500,
+                };
+        }
     }
 
     println!("# Cordon configuration — {} mode", mode);

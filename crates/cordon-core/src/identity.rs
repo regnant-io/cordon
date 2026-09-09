@@ -104,6 +104,13 @@ pub struct ClientPolicy {
     /// Certificate fingerprint pins. Empty means any CA-issued certificate
     /// bearing this client ID is accepted.
     pub cert_pins: Vec<String>,
+    /// Content policy applied to this client's output.
+    ///
+    /// A path to a JSON [`ContentPolicy`](crate::output_filter::ContentPolicy).
+    /// `None` uses the node's default policy. Compiled once at startup, so a
+    /// malformed rule stops the node rather than failing a request.
+    #[serde(default)]
+    pub content_policy_path: Option<std::path::PathBuf>,
 }
 
 impl ClientPolicy {
@@ -120,6 +127,7 @@ impl ClientPolicy {
             log_export_allowed: false,
             policy_expires_at: None,
             cert_pins: vec![],
+            content_policy_path: None,
         }
     }
 
@@ -333,6 +341,24 @@ impl IdentityRegistry {
     /// Number of enrolled clients.
     pub fn client_count(&self) -> usize {
         self.policies.read().len()
+    }
+
+    /// Every distinct content-policy path any enrolled client references.
+    ///
+    /// The node compiles these once at startup, so a malformed rule is a
+    /// startup failure rather than a request failure — which matters, because
+    /// the request it would fail is one whose output was supposed to be
+    /// filtered.
+    pub fn content_policy_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut paths: Vec<std::path::PathBuf> = self
+            .policies
+            .read()
+            .values()
+            .filter_map(|p| p.content_policy_path.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     /// Number of clients currently under suspension.

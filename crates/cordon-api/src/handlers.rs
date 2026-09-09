@@ -440,7 +440,9 @@ pub async fn inference_stream(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
 
     tokio::spawn(async move {
-        let mut filter = StreamingFilter::new(node.output_filter.clone());
+        // The policy enrolled for this client, resolved when the request was
+        // admitted, so a streamed response is filtered exactly as a unary one.
+        let mut filter = StreamingFilter::new(session.output_filter.clone());
         let mut usage = cordon_core::inference::TokenUsage::default();
         let mut finish_reason = FinishReason::Stop;
         let mut failed: Option<CordonError> = None;
@@ -757,7 +759,8 @@ pub async fn provision_model(
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
     use cordon_audit::events::AdminAction;
 
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    state.node.client_may_administer(&client).map_err(map_err)?;
     state
         .node
         .authorize_admin(
@@ -830,7 +833,11 @@ pub async fn audit_verify(
     State(state): State<AppState>,
     Extension(vid): Extension<VerifiedIdentity>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    state
+        .node
+        .client_may_read_audit_log(&client)
+        .map_err(map_err)?;
 
     let log_dir = state.node.config.audit.log_path.clone();
     let vk = state.node.audit.verifying_key();
@@ -866,7 +873,11 @@ pub async fn audit_tail(
     Extension(vid): Extension<VerifiedIdentity>,
     Query(query): Query<AuditTailQuery>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    state
+        .node
+        .client_may_read_audit_log(&client)
+        .map_err(map_err)?;
 
     let n = query.n.unwrap_or(10).clamp(1, 1000) as usize;
     let audit = state.node.audit.clone();
@@ -909,7 +920,11 @@ pub async fn audit_anchor(
     State(state): State<AppState>,
     Extension(vid): Extension<VerifiedIdentity>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    state
+        .node
+        .client_may_read_audit_log(&client)
+        .map_err(map_err)?;
 
     let sequence = state.node.audit.sequence();
     let tail_hash = state.node.audit.tail_hash().unwrap_or_default();
@@ -976,7 +991,11 @@ pub async fn admin_teardown(
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
     use cordon_audit::events::AdminAction;
 
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    if let Err(e) = state.node.client_may_administer(&client) {
+        record_admin_event(&state.node, AdminAction::Teardown, &req.reason, false);
+        return Err(map_err(e));
+    }
     if let Err(e) = state
         .node
         .authorize_admin("teardown", &req.reason, &req.admin_signature)
@@ -1006,7 +1025,11 @@ pub async fn admin_recover(
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
     use cordon_audit::events::AdminAction;
 
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    if let Err(e) = state.node.client_may_administer(&client) {
+        record_admin_event(&state.node, AdminAction::Recovery, &req.reason, false);
+        return Err(map_err(e));
+    }
     if let Err(e) = state
         .node
         .authorize_admin("recover", &req.reason, &req.admin_signature)
@@ -1053,7 +1076,11 @@ pub async fn admin_quarantine(
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
     use cordon_audit::events::AdminAction;
 
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    if let Err(e) = state.node.client_may_administer(&client) {
+        record_admin_event(&state.node, AdminAction::ConfigChange, &req.reason, false);
+        return Err(map_err(e));
+    }
     if let Err(e) = state
         .node
         .authorize_admin("quarantine", &req.reason, &req.admin_signature)
@@ -1082,7 +1109,8 @@ pub async fn admin_suspend_client(
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
     use cordon_audit::events::AdminAction;
 
-    let _client = authenticated_client(&state.node, vid)?;
+    let client = authenticated_client(&state.node, vid)?;
+    state.node.client_may_administer(&client).map_err(map_err)?;
     let params = format!("{}:{}", req.client_id, req.duration_seconds);
     state
         .node

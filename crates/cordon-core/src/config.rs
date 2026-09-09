@@ -38,16 +38,11 @@ impl std::fmt::Display for DeploymentMode {
 /// TEE configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeeConfig {
-    /// Preferred TEE technology
+    /// Preferred TEE technology. Reported in every attestation report and
+    /// checked against the pinned `tee_type` during verification.
     pub preferred: TeePreference,
-    /// Minimum security version number
+    /// Minimum security version number, reported as the report's ISV SVN.
     pub minimum_security_version: u16,
-    /// Re-attestation interval in hours
-    pub re_attestation_interval_hours: u64,
-    /// Halt all inference if attestation fails
-    pub halt_on_attestation_failure: bool,
-    /// Enable Intel CAT / AMD QoS cache partitioning
-    pub cache_partitioning: bool,
 }
 
 impl Default for TeeConfig {
@@ -55,9 +50,6 @@ impl Default for TeeConfig {
         Self {
             preferred: TeePreference::AmdSevSnp,
             minimum_security_version: 3,
-            re_attestation_interval_hours: 24,
-            halt_on_attestation_failure: true,
-            cache_partitioning: true,
         }
     }
 }
@@ -79,16 +71,8 @@ pub enum TeePreference {
 /// Network configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    /// Inbound whitelist rules
-    pub inbound_whitelist: Vec<InboundRule>,
-    /// Outbound policy (always zero-egress in production)
+    /// What outbound access Cordon may use. See [`OutboundPolicy`].
     pub outbound_policy: OutboundPolicy,
-    /// Hardware firewall type
-    pub hardware_firewall: FirewallType,
-    /// Whether SmartNIC ACLs are enforced
-    pub smartnic_acl: bool,
-    /// Management channel (Vault mode only)
-    pub mgmt_channel: Option<MgmtChannelConfig>,
     /// Bind address for the API server
     pub bind_address: String,
     /// API port
@@ -106,11 +90,7 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            inbound_whitelist: vec![],
             outbound_policy: OutboundPolicy::ZeroEgress,
-            hardware_firewall: FirewallType::DedicatedAppliance,
-            smartnic_acl: false,
-            mgmt_channel: None,
             bind_address: "0.0.0.0".to_string(),
             api_port: 8443,
             tls_cert_path: PathBuf::from("/etc/cordon/tls/server.crt"),
@@ -121,74 +101,41 @@ impl Default for NetworkConfig {
     }
 }
 
-/// Inbound whitelist rule
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboundRule {
-    /// Source CIDR
-    pub cidr: String,
-    /// Allowed port
-    pub port: u16,
-    /// Protocol
-    pub protocol: String,
-}
-
-/// Outbound policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// What outbound network access this deployment permits.
+///
+/// # What Cordon can and cannot enforce
+///
+/// Cordon is a process. It cannot stop packets leaving the host — that is a
+/// firewall's job, and the deployment guide says so. What it *can* do, and now
+/// does, is refuse to initiate egress itself: under [`Self::ZeroEgress`] the
+/// model downloader is disabled and a non-loopback runtime endpoint is refused,
+/// so no code path in Cordon opens a connection off the machine.
+///
+/// That is a real property and a narrower one than "no egress". State it that
+/// way to operators rather than letting a configuration field imply the network
+/// is sealed when only Cordon's own behaviour is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundPolicy {
-    /// Zero egress — all outbound dropped
+    /// Cordon initiates no outbound connections. Models arrive as encrypted
+    /// bundles through `cordon-provision`, and the model runtime must be local.
     ZeroEgress,
-    /// Restricted — only management channel
+    /// Cordon may reach the network — to fetch models from the Hugging Face
+    /// Hub, and to reach a runtime endpoint the operator configured.
     Restricted,
 }
 
-/// Hardware firewall type
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FirewallType {
-    /// Palo Alto PA-Series
-    PaloAlto,
-    /// Juniper SRX
-    JuniperSrx,
-    /// pfSense on dedicated hardware
-    PfSense,
-    /// Dedicated appliance (generic)
-    DedicatedAppliance,
-    /// None (development/Light mode only)
-    None,
-}
-
-/// Management channel configuration (Vault mode)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MgmtChannelConfig {
-    /// Management endpoint
-    pub endpoint: String,
-    /// Certificate pin (sha256 hex)
-    pub certificate_pin: String,
-}
-
-/// Side-channel mitigation configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Side-channel mitigation configuration.
+///
+/// Only timing normalisation is here, because it is the only one Cordon
+/// implements. This section previously also carried `constant_time_enforcement`,
+/// `memory_zeroize_on_completion` and `response_size_padding`, none of which any
+/// code read — an operator could set all three, read the file back as a summary
+/// of the node's defences, and be wrong about all of them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SideChannelConfig {
-    /// Enforce constant-time execution paths
-    pub constant_time_enforcement: bool,
-    /// Zero memory on inference completion
-    pub memory_zeroize_on_completion: bool,
-    /// Response size padding
-    pub response_size_padding: bool,
-    /// Timing normalization settings
+    /// Timing normalization settings.
     pub timing_normalization: TimingNormalizationConfig,
-}
-
-impl Default for SideChannelConfig {
-    fn default() -> Self {
-        Self {
-            constant_time_enforcement: true,
-            memory_zeroize_on_completion: true,
-            response_size_padding: true,
-            timing_normalization: TimingNormalizationConfig::default(),
-        }
-    }
 }
 
 /// Timing normalization configuration
@@ -227,59 +174,48 @@ pub enum TimingMode {
     None,
 }
 
-/// HSM configuration
+/// Key-custody declaration.
+///
+/// Cordon does not talk to an HSM. The Client Master Key reaches it through
+/// `CORDON_CMK_FILE`, and where that file comes from — an HSM export, a secrets
+/// manager, a tmpfs — is the operator's arrangement.
+///
+/// `fips_level` is therefore an operator *declaration*, not something Cordon
+/// verifies, and it is used only to refuse a configuration that contradicts its
+/// own mode: Dark mode claims a FIPS 140-2 Level 4 HSM, so a Dark configuration
+/// declaring less is refused as internally inconsistent. The previous version
+/// of this section also carried a provider name, a slot ID and a PIN variable,
+/// which together looked like PKCS#11 integration and were read by nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HsmConfig {
-    /// HSM provider
-    pub provider: HsmProvider,
-    /// FIPS level required
+    /// The FIPS 140-2 level the operator asserts their key custody meets.
     pub fips_level: u8,
-    /// HSM slot ID
-    pub slot_id: u32,
-    /// HSM PIN (from environment variable, not config file)
-    pub pin_env_var: String,
 }
 
 impl Default for HsmConfig {
     fn default() -> Self {
-        Self {
-            provider: HsmProvider::SoftHsm2,
-            fips_level: 3,
-            slot_id: 0,
-            pin_env_var: "CORDON_HSM_PIN".to_string(),
-        }
+        Self { fips_level: 3 }
     }
 }
 
-/// HSM provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HsmProvider {
-    /// Thales Luna HSM
-    ThalesLuna,
-    /// Entrust nShield
-    EntrustNshield,
-    /// SoftHSM2 (development/Light mode)
-    SoftHsm2,
-    /// AWS CloudHSM (SovereignCloud mode)
-    AwsCloudHsm,
-    /// YubiHSM (compact deployments)
-    YubiHsm,
-}
-
-/// Boot/TPM configuration
+/// Boot/TPM configuration.
+///
+/// `secure_boot` and `dm_verity` are operator declarations reported on the
+/// health endpoint; Cordon does not verify them itself, and a TPM-attested
+/// deployment gets the real answer from PCR 7 and the pinned values. The
+/// `pcr_policy` block that used to live here duplicated
+/// `[attestation.expected.pcr_values]` and was read by nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
-    /// Require TPM 2.0
+    /// Require a TPM 2.0 device. Enforced when the measurement source is
+    /// `tpm2`.
     pub tpm_required: bool,
-    /// TPM version string
+    /// TPM version string, reported on the health endpoint.
     pub tpm_version: String,
-    /// Require UEFI Secure Boot
+    /// Whether the operator asserts UEFI Secure Boot is enabled.
     pub secure_boot: bool,
-    /// Require dm-verity on root filesystem
+    /// Whether the operator asserts dm-verity protects the root filesystem.
     pub dm_verity: bool,
-    /// PCR policy — required PCR indices and expected values
-    pub pcr_policy: PcrPolicy,
 }
 
 impl Default for BootConfig {
@@ -289,25 +225,6 @@ impl Default for BootConfig {
             tpm_version: "2.0".to_string(),
             secure_boot: true,
             dm_verity: true,
-            pcr_policy: PcrPolicy::default(),
-        }
-    }
-}
-
-/// PCR policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PcrPolicy {
-    /// Required PCR indices
-    pub required_pcrs: Vec<u8>,
-    /// Expected PCR values (hex) — populated at provisioning time
-    pub expected_values: std::collections::HashMap<u8, String>,
-}
-
-impl Default for PcrPolicy {
-    fn default() -> Self {
-        Self {
-            required_pcrs: vec![0, 4, 7, 8, 11, 13],
-            expected_values: std::collections::HashMap::new(),
         }
     }
 }
@@ -349,14 +266,10 @@ pub struct InferenceConfig {
     pub max_concurrent_requests: u32,
     /// Default request timeout in seconds
     pub default_timeout_seconds: u64,
-    /// Enforce per-client KV cache isolation
-    pub client_kv_cache_isolation: bool,
     /// Zero KV cache on session end
     pub kv_cache_zero_on_session_end: bool,
     /// Whether multi-tenant operation is allowed
     pub multi_tenant: bool,
-    /// Maximum input tokens
-    pub max_input_tokens: u32,
     /// Maximum output tokens
     pub max_output_tokens: u32,
 }
@@ -366,79 +279,31 @@ impl Default for InferenceConfig {
         Self {
             max_concurrent_requests: 32,
             default_timeout_seconds: 120,
-            client_kv_cache_isolation: true,
             kv_cache_zero_on_session_end: true,
             multi_tenant: false,
-            max_input_tokens: 32768,
             max_output_tokens: 4096,
         }
     }
 }
 
-/// Audit log configuration
+/// Audit log configuration.
+///
+/// The format is JSONL and the export method is "read the files"; both were
+/// configurable and neither was ever consulted. `retention_days` implied the
+/// node rotated old entries out, which it does not — an append-only log that
+/// deleted its own history would defeat the point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditConfig {
-    /// Audit log directory
+    /// Directory the audit log is written to.
     pub log_path: PathBuf,
-    /// Log format (always jsonl)
-    pub log_format: String,
-    /// Export method
-    pub export_method: String,
-    /// Log retention days
-    pub retention_days: u32,
-    /// Use enclave-derived signing key
-    pub signing_key_from_enclave: bool,
 }
 
 impl Default for AuditConfig {
     fn default() -> Self {
         Self {
             log_path: PathBuf::from("/cordon/audit"),
-            log_format: "jsonl".to_string(),
-            export_method: "operator_pull".to_string(),
-            retention_days: 365,
-            signing_key_from_enclave: true,
         }
     }
-}
-
-/// Update configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateConfig {
-    /// Update source
-    pub source: UpdateSource,
-    /// Require vendor signature on updates
-    pub require_vendor_signature: bool,
-    /// Require client (operator) signature on updates
-    pub require_client_signature: bool,
-    /// Use staged A/B rollout
-    pub staged_rollout: bool,
-    /// Auto-apply updates without operator review
-    pub auto_apply: bool,
-}
-
-impl Default for UpdateConfig {
-    fn default() -> Self {
-        Self {
-            source: UpdateSource::MgmtChannel,
-            require_vendor_signature: true,
-            require_client_signature: true,
-            staged_rollout: true,
-            auto_apply: false,
-        }
-    }
-}
-
-/// Update source
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateSource {
-    /// Physical media only (Dark mode)
-    PhysicalMedia,
-    /// Internal mirror
-    InternalMirror,
-    /// Management channel
-    MgmtChannel,
 }
 
 /// Sustained attack detector configuration
@@ -450,8 +315,6 @@ pub struct AttackDetectorConfig {
     pub global_failure_threshold_per_minute: u32,
     /// Covert channel score threshold to suspend client
     pub covert_channel_score_threshold: f32,
-    /// Enter quarantine on critical attack pattern
-    pub quarantine_on_critical: bool,
     /// Repeated identical input hashes to trigger rate-limit
     pub replay_probe_threshold: u32,
 }
@@ -462,7 +325,6 @@ impl Default for AttackDetectorConfig {
             auth_failure_threshold_per_minute: 10,
             global_failure_threshold_per_minute: 50,
             covert_channel_score_threshold: 0.7,
-            quarantine_on_critical: true,
             replay_probe_threshold: 20,
         }
     }
@@ -742,6 +604,18 @@ impl ExpectedMeasurementsConfig {
     }
 }
 
+/// Output content policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContentPolicyConfig {
+    /// A JSON policy applied to every client that does not name its own.
+    ///
+    /// Absent means the built-in default, which flags personally identifying
+    /// information and alters nothing. A client can override this by setting
+    /// `content_policy_path` in the client registry.
+    #[serde(default)]
+    pub default_path: Option<PathBuf>,
+}
+
 /// API request limits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
@@ -796,8 +670,6 @@ pub struct CordonConfig {
     pub inference: InferenceConfig,
     /// Audit log configuration
     pub audit: AuditConfig,
-    /// Update configuration
-    pub updates: UpdateConfig,
     /// Sustained attack detector configuration
     pub sustained_attack: AttackDetectorConfig,
     /// Model runtime configuration
@@ -812,6 +684,9 @@ pub struct CordonConfig {
     /// API request limits
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Output content policy
+    #[serde(default)]
+    pub content_policy: ContentPolicyConfig,
     /// Path to the client authorization registry (a JSON array of ClientPolicy)
     #[serde(default)]
     pub client_registry_path: Option<PathBuf>,
@@ -840,11 +715,13 @@ impl CordonConfig {
             network: NetworkConfig {
                 require_mtls: false,
                 client_ca_path: None,
+                // Light mode is the mode you pull a model in, so it has to be
+                // able to reach the Hub. Every other mode defaults to no egress.
+                outbound_policy: OutboundPolicy::Restricted,
                 ..NetworkConfig::default()
             },
             tee: TeeConfig {
                 preferred: TeePreference::Simulation,
-                halt_on_attestation_failure: false,
                 ..TeeConfig::default()
             },
             side_channel: SideChannelConfig {
@@ -853,13 +730,8 @@ impl CordonConfig {
                     mode: TimingMode::None,
                     ..TimingNormalizationConfig::default()
                 },
-                ..SideChannelConfig::default()
             },
-            hsm: HsmConfig {
-                provider: HsmProvider::SoftHsm2,
-                fips_level: 1,
-                ..HsmConfig::default()
-            },
+            hsm: HsmConfig { fips_level: 1 },
             boot: BootConfig {
                 tpm_required: false,
                 secure_boot: false,
@@ -872,7 +744,6 @@ impl CordonConfig {
                 ..InferenceConfig::default()
             },
             audit: AuditConfig::default(),
-            updates: UpdateConfig::default(),
             sustained_attack: AttackDetectorConfig::default(),
             runtime: RuntimeConfig {
                 backend: RuntimeBackend::None,
@@ -886,6 +757,7 @@ impl CordonConfig {
                 ..AttestationConfig::default()
             },
             limits: LimitsConfig::default(),
+            content_policy: ContentPolicyConfig::default(),
             client_registry_path: None,
             log_level: "info".to_string(),
         }
@@ -993,6 +865,40 @@ impl CordonConfig {
             }
         }
 
+        // ── Egress ──────────────────────────────────────────────────────────
+        // Vault, Island and Dark are documented as having no outbound access.
+        // Nothing checked that, so a configuration could claim one of those
+        // modes while leaving Cordon free to reach the Hub.
+        if matches!(
+            self.mode,
+            DeploymentMode::Vault | DeploymentMode::Island | DeploymentMode::Dark
+        ) && self.permits_egress()
+        {
+            return Err(CordonError::ConfigError(format!(
+                "{} mode requires network.outbound_policy = \"zero_egress\". The mode \
+                 is documented as having no outbound access; a configuration that \
+                 claims it while permitting egress is claiming something it does not \
+                 deliver.",
+                self.mode
+            )));
+        }
+
+        if !self.permits_egress() {
+            if let Some(url) = &self.runtime.endpoint_url {
+                if self.runtime.backend == RuntimeBackend::External
+                    && !crate::runtime::is_loopback_url(url)
+                {
+                    return Err(CordonError::ConfigError(format!(
+                        "network.outbound_policy is \"zero_egress\" but \
+                         runtime.endpoint_url is {}, which is not on this host. Every \
+                         prompt would leave the machine. Use runtime.backend = \
+                         \"supervised\", or point at a loopback address.",
+                        url
+                    )));
+                }
+            }
+        }
+
         // ── Transport ───────────────────────────────────────────────────────
         if !is_light {
             if !self.network.require_mtls {
@@ -1082,14 +988,24 @@ impl CordonConfig {
         self.network.require_mtls
     }
 
-    /// Whether this deployment mode permits reaching the public internet to
-    /// fetch a model. Air-gapped modes acquire models from physical media
-    /// through `cordon-provision` instead.
+    /// Whether Cordon may open outbound connections.
+    pub fn permits_egress(&self) -> bool {
+        self.network.outbound_policy != OutboundPolicy::ZeroEgress
+    }
+
+    /// Whether this deployment may reach the public internet to fetch a model.
+    ///
+    /// Both the mode and the declared outbound policy have to allow it. The
+    /// mode alone used to decide, which meant an operator could set
+    /// `outbound_policy = "zero_egress"` on a Sovereign Cloud node, read that
+    /// back as a guarantee, and still have `cordon pull` reach the Hub.
+    /// Air-gapped deployments acquire models from physical media through
+    /// `cordon-provision`.
     pub fn permits_model_download(&self) -> bool {
         matches!(
             self.mode,
             DeploymentMode::Light | DeploymentMode::SovereignCloud
-        )
+        ) && self.permits_egress()
     }
 
     /// Whether the attestation report's measurements come from hardware.
@@ -1149,7 +1065,7 @@ mod tests {
     /// break exactly one invariant and assert that it is the reason for refusal.
     fn hardened(mode: DeploymentMode) -> CordonConfig {
         let mut c = light();
-        c.mode = mode;
+        c.mode = mode.clone();
         c.tee.preferred = TeePreference::AmdSevSnp;
         c.boot.tpm_required = true;
         c.network.require_mtls = true;
@@ -1158,6 +1074,12 @@ mod tests {
         c.ui.enabled = false;
         c.inference.multi_tenant = false;
         c.hsm.fips_level = 4;
+        // Sovereign Cloud is the one hardened mode that may reach the network.
+        c.network.outbound_policy = if mode == DeploymentMode::SovereignCloud {
+            OutboundPolicy::Restricted
+        } else {
+            OutboundPolicy::ZeroEgress
+        };
         c.attestation = AttestationConfig {
             measurement_source: MeasurementSource::Tpm2,
             expected: Some(ExpectedMeasurementsConfig {
@@ -1303,6 +1225,64 @@ mod tests {
         let mut c = light();
         c.limits.max_request_bytes = 0;
         assert!(c.validate().is_err());
+    }
+
+    /// Vault, Island and Dark are documented as having no outbound access, and
+    /// nothing used to check it — a configuration could claim one of those
+    /// modes while leaving Cordon free to reach the Hub.
+    #[test]
+    fn air_gapped_modes_must_declare_zero_egress() {
+        for mode in [
+            DeploymentMode::Vault,
+            DeploymentMode::Island,
+            DeploymentMode::Dark,
+        ] {
+            let mut c = hardened(mode.clone());
+            c.network.outbound_policy = OutboundPolicy::Restricted;
+            let err = c.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("zero_egress"),
+                "{} should require zero egress: {}",
+                mode,
+                err
+            );
+        }
+
+        // Sovereign Cloud exists to pull models, so it may reach the network.
+        let mut c = hardened(DeploymentMode::SovereignCloud);
+        c.network.outbound_policy = OutboundPolicy::Restricted;
+        assert!(c.validate().is_ok());
+    }
+
+    /// The declared policy has to bind, not merely describe. An operator who
+    /// sets zero egress and reads it back as a guarantee should not find that
+    /// `cordon pull` still reaches the Hub.
+    #[test]
+    fn declaring_zero_egress_disables_model_downloads() {
+        let mut c = light();
+        assert!(c.permits_model_download());
+
+        c.network.outbound_policy = OutboundPolicy::ZeroEgress;
+        assert!(!c.permits_egress());
+        assert!(
+            !c.permits_model_download(),
+            "a zero-egress node must not fetch models over the network"
+        );
+    }
+
+    #[test]
+    fn zero_egress_refuses_a_remote_runtime_endpoint() {
+        let mut c = light();
+        c.network.outbound_policy = OutboundPolicy::ZeroEgress;
+        c.runtime.backend = RuntimeBackend::External;
+        c.runtime.endpoint_url = Some("http://10.0.0.5:8000".into());
+
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("zero_egress"), "unexpected: {}", err);
+
+        // A loopback endpoint involves no egress and is fine.
+        c.runtime.endpoint_url = Some("http://127.0.0.1:8000".into());
+        assert!(c.validate().is_ok());
     }
 
     #[test]
