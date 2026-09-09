@@ -79,6 +79,14 @@ pub enum CordonError {
     #[error("FATAL: Audit log write failed: {0} — request rejected per log-before-process policy")]
     AuditWriteFailed(String),
 
+    /// The audit log directory is claimed by another node.
+    ///
+    /// A startup condition rather than a request failure, and worth its own
+    /// variant so the message does not talk about rejected requests when no
+    /// request has been made.
+    #[error("{0}")]
+    AuditLogUnavailable(String),
+
     /// Administrative command rejected
     #[error("Admin command rejected: {0}")]
     AdminRejected(String),
@@ -156,7 +164,12 @@ impl From<cordon_crypto::CryptoError> for CordonError {
 
 impl From<cordon_audit::AuditError> for CordonError {
     fn from(e: cordon_audit::AuditError) -> Self {
-        CordonError::AuditWriteFailed(e.to_string())
+        match e {
+            cordon_audit::AuditError::AlreadyLocked(message) => {
+                CordonError::AuditLogUnavailable(message)
+            }
+            other => CordonError::AuditWriteFailed(other.to_string()),
+        }
     }
 }
 

@@ -356,3 +356,76 @@ fn log_files_are_not_world_readable() {
         & 0o777;
     assert_eq!(mode, 0o600, "audit log mode was {:o}", mode);
 }
+
+// ─── Exclusive writer ────────────────────────────────────────────────────────
+
+/// Two nodes pointed at one directory both continue from the highest sequence
+/// and both append, forking the chain: two entries claim the same sequence and
+/// neither hashes to the other's predecessor. The verifier then reports a
+/// broken chain, which is correct and reads as tampering — the worst possible
+/// way to learn that someone started a second node by mistake.
+#[test]
+fn a_second_writer_is_refused_rather_than_forking_the_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = AuditLog::open(config(dir.path()), SigningKey::from_seed(&[1u8; 32])).unwrap();
+    first.append(event("a")).unwrap();
+
+    let err = match AuditLog::open(config(dir.path()), SigningKey::from_seed(&[1u8; 32])) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a second writer must be refused"),
+    };
+
+    assert!(
+        err.contains("already writing"),
+        "the refusal should name the cause: {}",
+        err
+    );
+    // And it should say what to do, including how to recover from a crash.
+    assert!(err.contains("did not shut down cleanly"), "got: {}", err);
+
+    // The first log is unaffected and still verifies.
+    let vk = SigningKey::from_seed(&[1u8; 32]).verifying_key();
+    assert!(
+        verify_log_chain(dir.path(), &vk, "deployment-1")
+            .unwrap()
+            .valid
+    );
+}
+
+#[test]
+fn the_claim_is_released_when_the_log_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let log = AuditLog::open(config(dir.path()), SigningKey::from_seed(&[2u8; 32])).unwrap();
+        log.append(event("before")).unwrap();
+    }
+
+    // A clean shutdown leaves the directory claimable again.
+    let reopened = AuditLog::open(config(dir.path()), SigningKey::from_seed(&[2u8; 32])).unwrap();
+    reopened.append(event("after")).unwrap();
+
+    let vk = SigningKey::from_seed(&[2u8; 32]).verifying_key();
+    let result = verify_log_chain(dir.path(), &vk, "deployment-1").unwrap();
+    assert!(result.valid, "violations: {:?}", result.violations);
+    assert_eq!(result.entries_verified, 3);
+}
+
+/// The lock file must not be mistaken for a log segment.
+#[test]
+fn the_claim_file_is_not_read_as_log_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = AuditLog::open(config(dir.path()), SigningKey::from_seed(&[3u8; 32])).unwrap();
+    log.append(event("a")).unwrap();
+
+    assert_eq!(
+        log_files(dir.path()).len(),
+        1,
+        "only the .jsonl segment counts"
+    );
+    let vk = SigningKey::from_seed(&[3u8; 32]).verifying_key();
+    assert!(
+        verify_log_chain(dir.path(), &vk, "deployment-1")
+            .unwrap()
+            .valid
+    );
+}
