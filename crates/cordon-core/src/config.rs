@@ -614,8 +614,14 @@ impl Default for AttestationConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExpectedMeasurementsConfig {
     /// Expected PCR values, by index.
+    ///
+    /// A `BTreeMap` so the values an operator reviews, and the file they are
+    /// written into, are always in ascending index order. With a `HashMap` the
+    /// generated block came out shuffled differently on every run, which makes
+    /// a diff between two pinnings unreadable — and reviewing that diff is the
+    /// entire point of pinning by hand.
     #[serde(default)]
-    pub pcr_values: std::collections::HashMap<u8, String>,
+    pub pcr_values: std::collections::BTreeMap<u8, String>,
     /// Expected enclave measurement.
     #[serde(default)]
     pub mrenclave: Option<String>,

@@ -536,6 +536,14 @@ async fn status(api: &str, client_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fetch a report and check it here, rather than asking the node whether it
+/// approves of itself.
+///
+/// `POST /v1/attestation/verify` has the node run the check against its own
+/// pinned configuration. That is a useful gate for the node, and it is not
+/// evidence for you: every input to it is under the node's control except the
+/// nonce. This command instead fetches the report bound to a challenge chosen
+/// here and runs the verifier locally, which is what a client is supposed to do.
 async fn attest(api: &str, client_id: &str, pin: bool) -> Result<()> {
     let nonce = uuid::Uuid::new_v4().to_string();
     let client = reqwest::Client::builder()
@@ -543,39 +551,65 @@ async fn attest(api: &str, client_id: &str, pin: bool) -> Result<()> {
         .build()?;
 
     let response = client
-        .post(format!(
-            "{}/v1/attestation/verify",
-            api.trim_end_matches('/')
-        ))
+        .get(format!("{}/v1/attestation", api.trim_end_matches('/')))
+        .query(&[("nonce", nonce.as_str())])
         .header("x-client-id", client_id)
-        .json(&serde_json::json!({ "nonce": nonce }))
         .send()
         .await
         .with_context(|| format!("cannot reach a Cordon node at {}", api))?;
 
+    if !response.status().is_success() {
+        bail!("the node returned HTTP {}", response.status());
+    }
     let body: serde_json::Value = response.json().await.context("malformed response")?;
 
     if pin {
         return print_pin_block(&body);
     }
 
-    let verified = body["verified"].as_bool().unwrap_or(false);
+    let report: cordon_crypto::attestation::AttestationReport =
+        serde_json::from_value(body["report"].clone())
+            .context("the node returned a report this version cannot parse")?;
+
     println!("Attestation");
-    println!("  Verified      {}", verified);
+    println!("  Node          {}", report.combined.node_id);
     println!(
         "  Source        {}",
-        body["measurement_source"].as_str().unwrap_or("—")
+        report.combined.tee_quote.measurement_source
     );
+    println!("  Measurement   {}", report.combined.tee_quote.mrenclave);
     println!(
-        "  Measurement   {}",
-        body["mrenclave"].as_str().unwrap_or("—")
+        "  Signing key   {}",
+        if report.combined.tee_quote.enclave_signing_key_hex.is_empty() {
+            "— (the report declares none)".to_string()
+        } else {
+            report.combined.tee_quote.enclave_signing_key_hex.clone()
+        }
     );
-    if let Some(reason) = body["reason"].as_str() {
-        println!("  Reason        {}", reason);
+    println!();
+
+    // Two independent things: whether the platform signed for these
+    // measurements, and whether they match anything you have decided to trust.
+    let platform = report.combined.tpm_quote.has_hardware_evidence();
+    println!(
+        "  Platform quote {}",
+        if platform {
+            "present"
+        } else {
+            "absent — this is a software measurement"
+        }
+    );
+
+    if !platform {
         println!();
-        println!("  If this node has no pinned measurements, capture them with:");
-        println!("      cordon attest --pin >> /etc/cordon/cordon.toml");
+        println!("  A software measurement attests the node's configuration and nothing");
+        println!("  about the platform underneath it. An attacker with code execution on");
+        println!("  the host can reproduce it exactly.");
     }
+
+    println!();
+    println!("  Pin these measurements to check future reports against them:");
+    println!("      cordon attest --pin >> /etc/cordon/cordon.toml");
     Ok(())
 }
 
@@ -586,7 +620,7 @@ async fn attest(api: &str, client_id: &str, pin: bool) -> Result<()> {
 fn print_pin_block(body: &serde_json::Value) -> Result<()> {
     let report = body
         .get("report")
-        .context("the node returned no report to pin; it may already be verified")?;
+        .context("the node returned no attestation report")?;
 
     let pcrs = report
         .pointer("/combined/tpm_quote/pcr_values/values")

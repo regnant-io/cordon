@@ -24,7 +24,7 @@
 //! path is not run against physical hardware here. Verify it on your own
 //! hardware with `cordon doctor` before relying on it.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -60,9 +60,9 @@ pub fn ak_context_path() -> Option<PathBuf> {
 /// Read the given PCR indices from the SHA-256 bank.
 ///
 /// Returns a map of index to `"sha256:<hex>"`.
-pub fn read_pcrs(indices: &[u8]) -> CordonResult<HashMap<u8, String>> {
+pub fn read_pcrs(indices: &[u8]) -> CordonResult<BTreeMap<u8, String>> {
     if indices.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(BTreeMap::new());
     }
     let selection = pcr_selection(indices);
     let output = run(&["tpm2_pcrread", &selection])?;
@@ -82,8 +82,16 @@ pub fn read_pcrs(indices: &[u8]) -> CordonResult<HashMap<u8, String>> {
     Ok(parsed)
 }
 
-/// Produce a signed quote over the standard PCR selection, bound to `nonce`.
-pub fn quote(nonce: &str) -> CordonResult<TpmQuoteResult> {
+/// Produce a signed quote over the standard PCR selection, committing to
+/// `challenge`.
+///
+/// `challenge` is placed in the quote's `extraData`, which is the field a
+/// verifier checks to know the quote is fresh and what it is about. Cordon
+/// passes
+/// [`attestation_challenge`](cordon_crypto::attestation::attestation_challenge)
+/// — a digest over the verifier's nonce *and* the node's response-signing key —
+/// so a verified quote binds both.
+pub fn quote(challenge: &[u8]) -> CordonResult<TpmQuoteResult> {
     let ak_ctx = ak_context_path().ok_or_else(|| {
         CordonError::AttestationInvalid(
             "CORDON_TPM_AK_CTX is unset or points at a missing file. Provision an \
@@ -94,12 +102,8 @@ pub fn quote(nonce: &str) -> CordonResult<TpmQuoteResult> {
     })?;
     let ak_ctx = ak_ctx.to_string_lossy().into_owned();
 
-    // The nonce is passed to the TPM as hex, so hash the caller's value to get a
-    // fixed-width qualifying digest regardless of what they supplied.
-    let qualifying_data = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(nonce.as_bytes()))
-    };
+    // tpm2_quote takes the qualifying data as hex.
+    let qualifying_data = hex::encode(challenge);
 
     let selection = pcr_selection(crate::attestation_service::PcrAllocations::ALL);
 
@@ -234,8 +238,8 @@ fn run(args: &[&str]) -> CordonResult<String> {
 }
 
 /// Parse `tpm2_pcrread` output lines of the form `  4 : 0x<HEX>`.
-fn parse_pcrread(text: &str) -> HashMap<u8, String> {
-    let mut map = HashMap::new();
+fn parse_pcrread(text: &str) -> BTreeMap<u8, String> {
+    let mut map = BTreeMap::new();
     for line in text.lines() {
         let line = line.trim();
         let Some((index_part, value_part)) = line.split_once(':') else {
@@ -282,7 +286,7 @@ mod tests {
     fn quote_without_an_ak_context_fails_closed() {
         // Deliberately not set in the test environment.
         if ak_context_path().is_none() {
-            let err = quote("some-nonce").unwrap_err().to_string();
+            let err = quote(&[0u8; 32]).unwrap_err().to_string();
             assert!(
                 err.contains("CORDON_TPM_AK_CTX"),
                 "unexpected error: {}",
