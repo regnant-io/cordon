@@ -1067,6 +1067,29 @@ impl CordonNode {
         session_id: Option<Uuid>,
         timeout: Duration,
     ) -> CordonResult<StreamingSession> {
+        // Streaming and timing normalisation are mutually exclusive, and the
+        // honest resolution is to refuse rather than to serve a stream under a
+        // guarantee it cannot keep. Normalisation works by holding a completed
+        // response until a bucket boundary; a stream, by construction, releases
+        // text as it is produced, so the gaps between chunks carry exactly the
+        // per-token timing the setting exists to hide. Delaying only the
+        // terminal event would normalise the total and leave the signal intact.
+        //
+        // Every other mode mismatch in Cordon fails closed at the point of use,
+        // and a caller told "no" can fall back to the unary endpoint, which does
+        // normalise. A caller silently served an unnormalised stream cannot.
+        if self.timing.is_active() {
+            return Err(CordonError::ModeForbidden {
+                mode: self.config.mode.to_string(),
+                reason: "streaming is refused while side_channel.timing_normalization is \
+                         enabled. A stream releases text as it is generated, so the \
+                         intervals between chunks carry the per-token timing that \
+                         normalisation exists to remove. Use POST /v1/inference, which \
+                         is normalised, or disable timing normalisation."
+                    .into(),
+            });
+        }
+
         let request_id = Uuid::new_v4();
         self.admit(client, model_id, &messages, &params)?;
 
@@ -1145,13 +1168,17 @@ impl CordonNode {
     /// the released text, and write the completion record to the audit log.
     ///
     /// `released` is the text the caller actually transmitted. Passing `None`
-    /// records a failed or policy-terminated stream.
+    /// records a failed or policy-terminated stream. `policy_rules_matched` is
+    /// the set of rules the streaming filter fired, which the caller holds — the
+    /// audit record is the same shape as the unary path's, so a reader cannot
+    /// tell from the log whether a redaction happened on one path or the other.
     pub fn finish_streaming_inference(
         &self,
         meta: &StreamingMeta,
         released: Option<&str>,
         usage: crate::inference::TokenUsage,
         finish_reason: FinishReason,
+        policy_rules_matched: Vec<String>,
     ) -> StreamingRecord {
         self.rate_limiter.settle(
             &meta.client_id,
@@ -1177,7 +1204,10 @@ impl CordonNode {
         }
 
         let latency_ms = meta.started.elapsed().as_millis() as u64;
-        let content_policy_triggered = released.is_none();
+        // A stream that was stopped by policy triggered it; so did one that
+        // completed with rules having fired along the way. Recording only the
+        // first would log a redacted stream as though no policy had applied.
+        let content_policy_triggered = released.is_none() || !policy_rules_matched.is_empty();
 
         let _ = self.audit.append(AuditEvent::Inference(InferenceEvent {
             request_id: meta.request_id,
@@ -1192,7 +1222,7 @@ impl CordonNode {
             latency_ms,
             finish_reason: audit_finish_reason(finish_reason),
             content_policy_triggered,
-            policy_rules_matched: vec![],
+            policy_rules_matched: policy_rules_matched.clone(),
             covert_channel_score: covert.anomaly_score,
             timing_bucket_ms: self.timing.bucket_ms(),
         }));
@@ -1211,7 +1241,7 @@ impl CordonNode {
             output_hash,
             latency_ms,
             content_policy_triggered,
-            policy_rules_matched: vec![],
+            policy_rules_matched,
             covert_channel_score: covert.anomaly_score,
         }
     }

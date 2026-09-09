@@ -30,6 +30,22 @@ use crate::error::{CordonError, CordonResult};
 /// adversarial input at the cost of forgetting old hashes.
 const MAX_TRACKED_INPUT_HASHES: usize = 100_000;
 
+/// The share of the session table any one client may hold, as a fraction of the
+/// whole.
+///
+/// An eighth leaves room for at least eight clients to be active at once while
+/// still letting a single busy client hold a substantial number of
+/// conversations. The floor keeps the ceiling usable on very small tables.
+const CLIENT_SESSION_SHARE_DIVISOR: usize = 8;
+
+/// Fewest sessions any client may hold, whatever the table size.
+const MIN_SESSIONS_PER_CLIENT: usize = 8;
+
+/// Default per-client session ceiling for a table of `max_sessions`.
+fn default_client_share(max_sessions: usize) -> usize {
+    (max_sessions / CLIENT_SESSION_SHARE_DIVISOR).max(MIN_SESSIONS_PER_CLIENT)
+}
+
 /// A single message in the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -269,19 +285,43 @@ pub struct SessionInfo {
 }
 
 /// Session and KV-cache isolation manager.
+///
+/// Two ceilings apply, and both matter. The table as a whole is bounded so the
+/// node's memory is, and each client is bounded within it so that one caller
+/// cannot consume the table and deny everyone else — a session is opened by
+/// naming any unused identifier and lives until it goes idle, so without a
+/// per-client share a single client could fill the table in one burst.
 pub struct KvCacheManager {
     sessions: Arc<RwLock<HashMap<Uuid, ClientSession>>>,
     zero_on_end: bool,
     max_sessions: usize,
+    max_sessions_per_client: usize,
 }
 
 impl KvCacheManager {
     /// Create a manager holding at most `max_sessions` concurrent sessions.
+    ///
+    /// Each client is limited to a share of that, so the table cannot be
+    /// monopolised. See [`Self::with_client_limit`] to set the share directly.
     pub fn new(zero_on_end: bool, max_sessions: usize) -> Self {
+        Self::with_client_limit(
+            zero_on_end,
+            max_sessions,
+            default_client_share(max_sessions),
+        )
+    }
+
+    /// Create a manager with an explicit per-client session ceiling.
+    pub fn with_client_limit(
+        zero_on_end: bool,
+        max_sessions: usize,
+        max_sessions_per_client: usize,
+    ) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             zero_on_end,
             max_sessions,
+            max_sessions_per_client: max_sessions_per_client.max(1),
         }
     }
 
@@ -305,31 +345,42 @@ impl KvCacheManager {
                 )),
                 None => {
                     // An unknown identifier is treated as a request to open that
-                    // session for the caller, which is safe: it is not currently
-                    // owned by anyone.
-                    Self::insert_session(&mut sessions, sid, client_id, self.max_sessions)?;
+                    // session for the caller. That is safe — nobody owns it —
+                    // but it is also the cheapest way to consume table space, so
+                    // it goes through the same two ceilings as any other open.
+                    self.insert_session(&mut sessions, sid, client_id)?;
                     Ok(sid)
                 }
             };
         }
 
         let sid = Uuid::new_v4();
-        Self::insert_session(&mut sessions, sid, client_id, self.max_sessions)?;
+        self.insert_session(&mut sessions, sid, client_id)?;
         Ok(sid)
     }
 
     fn insert_session(
+        &self,
         sessions: &mut HashMap<Uuid, ClientSession>,
         sid: Uuid,
         client_id: &str,
-        max_sessions: usize,
     ) -> CordonResult<()> {
-        if sessions.len() >= max_sessions {
-            return Err(CordonError::Internal(format!(
-                "session table is full ({} sessions)",
-                max_sessions
-            )));
+        if sessions.len() >= self.max_sessions {
+            return Err(CordonError::Overloaded {
+                max_concurrent: self.max_sessions as u32,
+            });
         }
+
+        let held_by_client = sessions
+            .values()
+            .filter(|s| s.client_id == client_id)
+            .count();
+        if held_by_client >= self.max_sessions_per_client {
+            return Err(CordonError::RateLimitExceeded {
+                client_id: client_id.to_string(),
+            });
+        }
+
         let mut scratch = cordon_crypto::zeroize_ext::SecretVec::with_capacity(16);
         scratch.extend_from_slice(sid.as_bytes());
         let now = Utc::now();
@@ -344,6 +395,11 @@ impl KvCacheManager {
             },
         );
         Ok(())
+    }
+
+    /// The per-client session ceiling in force.
+    pub fn max_sessions_per_client(&self) -> usize {
+        self.max_sessions_per_client
     }
 
     /// Whether `client_id` owns `session_id`.
@@ -597,10 +653,61 @@ mod tests {
 
     #[test]
     fn session_table_is_bounded() {
-        let kv = KvCacheManager::new(true, 2);
+        let kv = KvCacheManager::with_client_limit(true, 2, 2);
         kv.open_session("a", None).unwrap();
         kv.open_session("b", None).unwrap();
         assert!(kv.open_session("c", None).is_err());
+    }
+
+    /// The denial of service this closes: sessions are opened by naming any
+    /// unused identifier and live until they go idle, so without a per-client
+    /// share one caller could fill the table in a burst and lock everyone else
+    /// out for the idle timeout.
+    #[test]
+    fn one_client_cannot_consume_the_whole_session_table() {
+        let kv = KvCacheManager::with_client_limit(true, 64, 4);
+
+        for _ in 0..4 {
+            kv.open_session("greedy", None).unwrap();
+        }
+        assert!(
+            kv.open_session("greedy", None).is_err(),
+            "a client past its share must be refused"
+        );
+
+        // Another client is unaffected, and the table is nowhere near full.
+        kv.open_session("polite", None).unwrap();
+        assert_eq!(kv.session_count(), 5);
+    }
+
+    /// Naming an unused identifier is the cheapest way to consume table space,
+    /// so it must be subject to the same ceiling as an unnamed open.
+    #[test]
+    fn claiming_unused_identifiers_is_capped_too() {
+        let kv = KvCacheManager::with_client_limit(true, 64, 3);
+        for _ in 0..3 {
+            kv.open_session("squatter", Some(Uuid::new_v4())).unwrap();
+        }
+        assert!(kv.open_session("squatter", Some(Uuid::new_v4())).is_err());
+    }
+
+    #[test]
+    fn ending_a_session_returns_the_clients_share() {
+        let kv = KvCacheManager::with_client_limit(true, 64, 2);
+        let first = kv.open_session("client", None).unwrap();
+        kv.open_session("client", None).unwrap();
+        assert!(kv.open_session("client", None).is_err());
+
+        kv.end_session(first);
+        kv.open_session("client", None)
+            .expect("the freed slot should be usable again");
+    }
+
+    #[test]
+    fn the_default_client_share_leaves_room_for_other_clients() {
+        assert_eq!(default_client_share(2048), 256);
+        // Small tables still give every client a workable floor.
+        assert_eq!(default_client_share(8), MIN_SESSIONS_PER_CLIENT);
     }
 
     #[test]
