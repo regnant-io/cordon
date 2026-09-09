@@ -627,6 +627,12 @@ pub async fn get_attestation(
         )
         .map_err(map_err)?;
 
+    state.node.record_attestation_event(
+        cordon_audit::events::AttestationTrigger::ClientRequest,
+        &nonce,
+        state.node.attestation.is_verified_by(&client.client_id),
+    );
+
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
@@ -689,28 +695,50 @@ pub async fn verify_attestation(
         .attestation
         .verify_for_client(&report, &req.nonce, &client.client_id)
     {
-        Ok(established) => Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "verified": true,
-                "client_id": client.client_id,
-                "mrenclave": report.combined.tee_quote.mrenclave,
-                "combined_hash": report.combined.combined_hash,
-                "measurement_source": report.combined.tee_quote.measurement_source,
-                // The distinction that matters: measurements matching is not the
-                // same as a platform having signed for them.
-                "platform_quote": match &established.platform_quote {
-                    cordon_crypto::attestation::PlatformQuoteStatus::Absent => "absent",
-                    cordon_crypto::attestation::PlatformQuoteStatus::Verified { .. } => "verified",
-                },
-                "binds_signing_key": established.binds_signing_key,
-                "hardware_rooted": established.is_hardware_rooted(),
-                "signature": signature,
-                "timestamp": report.combined.generated_at,
-            })),
-        )),
+        Ok(established) => {
+            state.node.record_attestation_event(
+                cordon_audit::events::AttestationTrigger::ClientRequest,
+                &req.nonce,
+                true,
+            );
+            Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "verified": true,
+                    "client_id": client.client_id,
+                    "mrenclave": report.combined.tee_quote.mrenclave,
+                    "combined_hash": report.combined.combined_hash,
+                    "measurement_source": report.combined.tee_quote.measurement_source,
+                    // The distinction that matters: measurements matching is not the
+                    // same as a platform having signed for them.
+                    "platform_quote": match &established.platform_quote {
+                        cordon_crypto::attestation::PlatformQuoteStatus::Absent => "absent",
+                        cordon_crypto::attestation::PlatformQuoteStatus::Verified { .. } => "verified",
+                    },
+                    "binds_signing_key": established.binds_signing_key,
+                    "hardware_rooted": established.is_hardware_rooted(),
+                    "signature": signature,
+                    "timestamp": report.combined.generated_at,
+                })),
+            ))
+        }
         Err(e) => {
             tracing::warn!(client_id = %client.client_id, "Attestation verification failed: {}", e);
+            state.node.record_attestation_event(
+                cordon_audit::events::AttestationTrigger::ClientRequest,
+                &req.nonce,
+                false,
+            );
+            state.node.record_security_alert(
+                cordon_audit::events::AlertType::AttestationFailure,
+                cordon_audit::events::AlertSeverity::High,
+                format!(
+                    "attestation verification failed for client {}",
+                    client.client_id
+                ),
+                cordon_audit::events::AutoAction::Continue,
+                Some(client.client_id.clone()),
+            );
             Ok((
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -851,6 +879,11 @@ pub async fn audit_verify(
     .map_err(|e| map_err(CordonError::Internal(e.to_string())))?;
 
     state.chain_health.set(result.valid);
+    state.node.record_log_access(
+        &client.client_id,
+        "chain_verify",
+        result.entries_verified as u64,
+    );
 
     Ok((
         StatusCode::OK,
@@ -886,6 +919,10 @@ pub async fn audit_tail(
         .await
         .map_err(|e| map_err(CordonError::Internal(e.to_string())))?
         .map_err(|e| map_err(CordonError::Internal(e.to_string())))?;
+
+    state
+        .node
+        .record_log_access(&client.client_id, "tail", entries.len() as u64);
 
     let rendered: Vec<serde_json::Value> = entries
         .iter()
@@ -929,6 +966,10 @@ pub async fn audit_anchor(
     let sequence = state.node.audit.sequence();
     let tail_hash = state.node.audit.tail_hash().unwrap_or_default();
     let timestamp = Utc::now();
+
+    state
+        .node
+        .record_log_access(&client.client_id, "anchor", sequence);
 
     let payload = format!(
         "CORDON_ANCHOR_v1|{}|{}|{}|{}",

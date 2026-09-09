@@ -25,6 +25,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
+use cordon_audit::events::{AuditEvent, TamperEvent, TamperSource};
+use cordon_audit::AuditLog;
+
 use crate::error::CordonResult;
 use crate::model_store::ModelStore;
 use crate::state::SharedNodeState;
@@ -43,6 +46,13 @@ pub struct IntegrityMonitor {
     interval_minutes: u64,
     /// Whether to halt on tamper
     halt_on_tamper: bool,
+    /// Where tamper findings are recorded.
+    ///
+    /// A weight-integrity violation used to reach `tracing` and nothing else,
+    /// so the one event most worth having a durable, tamper-evident record of
+    /// left none. Optional because the monitor is constructed before the log in
+    /// some orders; a monitor without one still quarantines.
+    audit: Mutex<Option<Arc<AuditLog>>>,
 }
 
 impl IntegrityMonitor {
@@ -62,8 +72,14 @@ impl IntegrityMonitor {
             last_result: Mutex::new(true),
             interval_minutes,
             halt_on_tamper,
+            audit: Mutex::new(None),
         };
         (monitor, tamper_flag)
+    }
+
+    /// Record tamper findings to this audit log.
+    pub fn attach_audit_log(&self, audit: Arc<AuditLog>) {
+        *self.audit.lock() = Some(audit);
     }
 
     /// Run a single integrity check cycle.
@@ -87,6 +103,7 @@ impl IntegrityMonitor {
                         bundle_id
                     );
                     all_passed = false;
+                    self.record_tamper(bundle_id);
 
                     if self.halt_on_tamper {
                         self.tamper_detected.store(true, Ordering::SeqCst);
@@ -154,6 +171,27 @@ impl IntegrityMonitor {
                 }
             }
         });
+    }
+
+    /// Write a tamper record, so the finding survives the process that made it.
+    fn record_tamper(&self, bundle_id: &str) {
+        let Some(audit) = self.audit.lock().clone() else {
+            return;
+        };
+        let _ = audit.append(AuditEvent::Tamper(TamperEvent {
+            source: TamperSource::WeightIntegrity,
+            // Cordon holds no HSM and does not zeroize on tamper; it withdraws
+            // the bundle and quarantines. Reporting a response that did not
+            // happen would be worse than reporting none.
+            hsm_zeroized: false,
+            enclave_zeroized: self.halt_on_tamper,
+            recovery_required: vec![
+                format!("bundle {} failed its ciphertext digest check", bundle_id),
+                "restore the bundle from provisioning media, or re-encrypt it with                  cordon-provision"
+                    .to_string(),
+                "then POST /v1/admin/recover with an admin signature".to_string(),
+            ],
+        }));
     }
 
     /// Get last check time
