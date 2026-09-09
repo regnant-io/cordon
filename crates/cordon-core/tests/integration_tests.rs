@@ -791,3 +791,126 @@ async fn privilege_flags_do_not_apply_until_clients_are_enrolled() {
     node.client_may_administer(&client("anyone")).unwrap();
     node.client_may_read_audit_log(&client("anyone")).unwrap();
 }
+
+// ─── Audit coverage ──────────────────────────────────────────────────────────
+
+/// Read every event type present in the log.
+fn event_types(node: &CordonNode) -> Vec<String> {
+    node.audit
+        .read_all_entries()
+        .unwrap()
+        .iter()
+        .map(|e| e.payload.event_type_str().to_string())
+        .collect()
+}
+
+/// Six of the nine audit event types were declared and never written, so
+/// attestation, security alerts, tamper findings and log reads existed only as
+/// `tracing` output — gone when the process was. The log is the durable,
+/// tamper-evident record; an event that never reaches it is not audited.
+#[tokio::test]
+async fn security_events_reach_the_audit_log() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Enrol one client so the registry is in denying mode, then have an
+    // unenrolled one try.
+    let registry = write_registry(dir.path(), &[ClientPolicy::default_for("enrolled")]);
+    let mut config = test_config(dir.path(), "security-events");
+    config.client_registry_path = Some(registry);
+    let node = Arc::new(CordonNode::build(config).await.unwrap());
+    node.go_operational().unwrap();
+
+    assert!(infer(&node, "stranger", "hello").await.is_err());
+
+    let types = event_types(&node);
+    assert!(
+        types.iter().any(|t| t == "security_alert"),
+        "a refused authorization should be recorded, got: {:?}",
+        types
+    );
+}
+
+#[tokio::test]
+async fn a_model_a_client_may_not_use_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut restricted = ClientPolicy::default_for("restricted");
+    restricted.permitted_models = vec!["permitted-model".into()];
+    let registry = write_registry(dir.path(), &[restricted]);
+
+    let mut config = test_config(dir.path(), "model-probe");
+    config.client_registry_path = Some(registry);
+    let node = Arc::new(CordonNode::build(config).await.unwrap());
+    node.go_operational().unwrap();
+
+    let refused = node
+        .process_inference(
+            &client("restricted"),
+            "some-other-model",
+            messages("hello"),
+            params(),
+            None,
+            Duration::from_secs(10),
+        )
+        .await;
+    assert!(refused.is_err());
+
+    assert!(
+        event_types(&node).iter().any(|t| t == "security_alert"),
+        "a model-permission refusal should be recorded"
+    );
+}
+
+#[tokio::test]
+async fn reading_the_audit_log_is_itself_audited() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = build_node(dir.path(), "log-access").await;
+
+    let before = node.audit.sequence();
+    node.record_log_access("auditor", "tail", 10);
+
+    assert!(node.audit.sequence() > before);
+    assert!(
+        event_types(&node).iter().any(|t| t == "log_export"),
+        "a log read should leave a record of who read it"
+    );
+}
+
+#[tokio::test]
+async fn attestation_requests_are_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = build_node(dir.path(), "attestation-events").await;
+
+    node.record_attestation_event(
+        cordon_audit::events::AttestationTrigger::ClientRequest,
+        "a-nonce-long-enough-to-use",
+        false,
+    );
+
+    let entries = node.audit.read_all_entries().unwrap();
+    let attestation = entries
+        .iter()
+        .find(|e| e.payload.event_type_str() == "attestation")
+        .expect("an attestation event should be recorded");
+
+    // The nonce is a client's own value; the log holds a digest of it rather
+    // than becoming a place to look up which client challenged when.
+    let rendered = serde_json::to_string(&attestation.payload).unwrap();
+    assert!(!rendered.contains("a-nonce-long-enough-to-use"));
+}
+
+#[tokio::test]
+async fn tamper_findings_are_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = build_node(dir.path(), "tamper-events").await;
+
+    node.record_tamper_event(
+        cordon_audit::events::TamperSource::WeightIntegrity,
+        vec!["restore the bundle".into()],
+    );
+
+    assert!(
+        event_types(&node).iter().any(|t| t == "tamper"),
+        "a tamper finding should survive the process that made it"
+    );
+}

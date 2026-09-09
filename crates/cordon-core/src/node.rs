@@ -379,6 +379,8 @@ impl CordonNode {
             config.model_store.integrity_check_interval_minutes,
             config.model_store.halt_on_tamper,
         );
+        // Tamper findings belong in the tamper-evident log, not only in stderr.
+        integrity_monitor.attach_audit_log(audit.clone());
 
         let metrics = Arc::new(
             CordonMetrics::new()
@@ -794,6 +796,110 @@ impl CordonNode {
         Ok(())
     }
 
+    /// Record that a client read the audit log.
+    ///
+    /// Reading the log is itself an event the log should contain. Without this
+    /// a client could enumerate every other client's traffic and leave no trace
+    /// of having done so — which makes the log a surveillance surface rather
+    /// than an accountability one.
+    pub fn record_log_access(&self, client_id: &str, what: &str, entries: u64) {
+        use cordon_audit::events::LogExportEvent;
+
+        let now = Utc::now();
+        let _ = self.audit.append(AuditEvent::LogExport(LogExportEvent {
+            requester_client_id: client_id.to_string(),
+            export_method: what.to_string(),
+            range_start: now,
+            range_end: now,
+            entries_exported: entries,
+            export_hash: String::new(),
+            recipient_key_id: self.enclave_key_id(),
+        }));
+    }
+
+    /// Record a security event: something the node decided to do about a
+    /// client's behaviour.
+    ///
+    /// These reached `tracing` and nothing else, so a suspension, an IP block,
+    /// or a covert-channel detection left no durable, tamper-evident record —
+    /// exactly the events an operator needs after the fact, and exactly the ones
+    /// an attacker would want absent.
+    pub fn record_security_alert(
+        &self,
+        alert_type: cordon_audit::events::AlertType,
+        severity: cordon_audit::events::AlertSeverity,
+        summary: impl Into<String>,
+        action: cordon_audit::events::AutoAction,
+        source: Option<String>,
+    ) {
+        use cordon_audit::events::{EnclaveState as AuditEnclaveState, SecurityAlertEvent};
+
+        let summary = summary.into();
+        let enclave_state_after = match self.state.read().status {
+            crate::state::NodeStatus::Quarantine => AuditEnclaveState::Quarantine,
+            crate::state::NodeStatus::Locked => AuditEnclaveState::Locked,
+            crate::state::NodeStatus::Zeroized => AuditEnclaveState::Zeroized,
+            _ => AuditEnclaveState::Operational,
+        };
+
+        let _ = self
+            .audit
+            .append(AuditEvent::SecurityAlert(SecurityAlertEvent {
+                alert_type,
+                severity,
+                // The summary is already free of client content; hashing it
+                // gives a stable identifier for correlating repeats.
+                detail_hash: hex::encode(Sha256::digest(summary.as_bytes())),
+                summary,
+                automatic_action: action,
+                enclave_state_after,
+                source_identifier: source,
+            }));
+    }
+
+    /// Record that an attestation report was produced and what it established.
+    pub fn record_attestation_event(
+        &self,
+        trigger: cordon_audit::events::AttestationTrigger,
+        nonce: &str,
+        client_verified: bool,
+    ) {
+        use cordon_audit::events::AttestationEvent;
+
+        let _ = self.audit.append(AuditEvent::Attestation(AttestationEvent {
+            trigger,
+            tpm_pcr_snapshot_hash: self.attestation.measurement_snapshot_hash(),
+            mrenclave: self.attestation.mrenclave(),
+            client_verified,
+            // Cordon does not gate key release on attestation today; the field
+            // records that plainly rather than implying otherwise.
+            key_released: false,
+            // The nonce is the client's own value and is not secret, but it is
+            // recorded as a digest so the log does not become a place to look
+            // up which client challenged when.
+            nonce: hex::encode(Sha256::digest(nonce.as_bytes())),
+        }));
+    }
+
+    /// Record a detected tamper and what was done about it.
+    pub fn record_tamper_event(
+        &self,
+        source: cordon_audit::events::TamperSource,
+        recovery_required: Vec<String>,
+    ) {
+        use cordon_audit::events::TamperEvent;
+
+        let _ = self.audit.append(AuditEvent::Tamper(TamperEvent {
+            source,
+            // Cordon holds no HSM and does not zeroize on tamper; it withdraws
+            // the bundle and quarantines. Saying so is better than reporting a
+            // response that did not happen.
+            hsm_zeroized: false,
+            enclave_zeroized: false,
+            recovery_required,
+        }));
+    }
+
     /// Whether per-client privilege flags are in force.
     ///
     /// They are once any client has been enrolled. Before that the registry
@@ -994,6 +1100,13 @@ impl CordonNode {
             self.metrics.auth_failures_total.inc();
             self.attack_detector
                 .record_auth_failure(&client.fingerprint);
+            self.record_security_alert(
+                cordon_audit::events::AlertType::AuthFailure,
+                cordon_audit::events::AlertSeverity::Medium,
+                format!("authorization refused for client {}", client.client_id),
+                cordon_audit::events::AutoAction::Continue,
+                Some(client.fingerprint.clone()),
+            );
             e
         })?;
 
@@ -1006,6 +1119,16 @@ impl CordonNode {
 
         if !policy.model_permitted(model_id) {
             self.attack_detector.record_invalid_model(&client.client_id);
+            self.record_security_alert(
+                cordon_audit::events::AlertType::SustainedProbe,
+                cordon_audit::events::AlertSeverity::Low,
+                format!(
+                    "client {} requested a model its policy does not admit",
+                    client.client_id
+                ),
+                cordon_audit::events::AutoAction::Continue,
+                Some(client.client_id.clone()),
+            );
             return Err(CordonError::AuthFailed(format!(
                 "client {} is not permitted to use model {}",
                 client.client_id, model_id
@@ -1152,6 +1275,16 @@ impl CordonNode {
                 .attack_detector
                 .record_covert_channel_score(&client.client_id, covert.anomaly_score);
             if suspended {
+                self.record_security_alert(
+                    cordon_audit::events::AlertType::CovertChannelSuspected,
+                    cordon_audit::events::AlertSeverity::High,
+                    format!(
+                        "client {} suspended after repeated covert-channel detections",
+                        client.client_id
+                    ),
+                    cordon_audit::events::AutoAction::SuspendClient,
+                    Some(client.client_id.clone()),
+                );
                 return Err(CordonError::CovertChannelDetected {
                     score: covert.anomaly_score,
                 });

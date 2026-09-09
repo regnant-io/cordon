@@ -98,15 +98,15 @@ impl TimingNormalizer {
     }
 }
 
-/// # Response size
-///
-/// Response *length* is a side channel this module does not close. An earlier
-/// version carried a `pad_response` helper and a `response_size_padding`
-/// configuration flag; nothing called the helper, so the flag described a
-/// defence that did not exist. Both are gone rather than left to imply
-/// otherwise. Padding a streamed response is not straightforward — the length
-/// is revealed as it is produced — and doing it properly means deciding on a
-/// bucket scheme and applying it on both paths.
+// ── Response size ───────────────────────────────────────────────────────────
+//
+// Response *length* is a side channel this module does not close. An earlier
+// version carried a `pad_response` helper and a `response_size_padding`
+// configuration flag; nothing called the helper, so the flag described a
+// defence that did not exist. Both are gone rather than left to imply
+// otherwise. Padding a streamed response is not straightforward — the length is
+// revealed as it is produced — and doing it properly means settling on a bucket
+// scheme and applying it on both paths.
 
 #[cfg(test)]
 mod tests {
