@@ -4,6 +4,177 @@ All notable changes to Cordon are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The theme of this release is the distance between what the configuration and the
+documentation described and what the code did. Some of that distance was a
+missing feature; some of it was a defence that reported success without
+performing the work its name described.
+
+### Cordon can now be a trusted execution environment
+
+`attestation.measurement_source = "sev_snp"` runs Cordon inside an AMD SEV-SNP
+guest, where the model runtime, the weights and the prompts are all inside the
+encrypted VM and the hypervisor is outside it. That closes the one adversary the
+threat model has always had to concede: root on the node. A TPM never closed it
+— a TPM attests how a machine booted and leaves the running machine to whoever
+owns it.
+
+- Report parsing, ECDSA P-384 signature verification, and a VCEK certificate
+  chain walk to a root the verifier pins. A report is refused if the guest was
+  launched debuggable (the hypervisor could then read its memory), if the
+  platform is below the pinned TCB floor, or if no AMD root is pinned.
+- Reports are read through the kernel's `configfs-tsm` interface (Linux 6.7+),
+  so no ioctl and no `unsafe`. The same path reaches Intel TDX, whose report
+  format is not yet parsed.
+- Implemented against AMD's specification and tested with synthetic keys — real
+  signatures over genuinely formatted structures, every refusal path covered.
+  **Not yet run against real silicon.** See `SECURITY.md`.
+
+### Attestation reports are now verifiable at all
+
+Three defects meant a client could not verify a report, which is the only thing
+a report is for.
+
+- **The report's digest was not reproducible.** It was computed with
+  `serde_json` over a `HashMap`, whose iteration order Rust randomises per
+  instance. The node hashed one order and a client that deserialized the report
+  hashed another, so verification failed on genuine reports — and passed on the
+  node only because the node re-verified the map it had just built. Digests a
+  verifier must reproduce now use an explicit, versioned, length-prefixed
+  encoding, and PCR values live in a `BTreeMap`.
+- **The TPM quote was unverifiable as delivered.** `tpm2_quote` produces the
+  signed `TPMS_ATTEST` structure and a signature over it; Cordon read both and
+  discarded the message, shipping a signature with nothing to check it against.
+  The message now travels with the report, and `cordon-crypto` parses the TPM
+  wire structures and checks the signature, the challenge, and that the PCR
+  values shown are the ones the TPM signed for.
+- **Nothing connected an attestation to an answer.** The platform's signature
+  now commits to a digest over both the client's nonce and the node's
+  response-signing key, so verifying the quote establishes that the key signing
+  your inference was resident on the platform you just measured.
+
+`AttestationReport::verify` returns what was established rather than a boolean,
+`GET /v1/attestation` accepts a `?nonce=`, and `cordon attest` verifies locally
+instead of asking the node whether it approves of itself.
+
+### Security fixes
+
+- **The runtime API key was passed on a command line**, where `ps` and
+  `/proc/<pid>/cmdline` publish it to every local user — the exact process the
+  key exists to exclude. It now goes in an owner-only file via `--api-key-file`.
+- **Staged plaintext weights could be redirected or exposed.** `mode(0o600)`
+  applies only when a file is created, so a pre-created world-readable file at
+  the staging path was opened and filled with the decrypted model; and `open`
+  follows symlinks, so a planted link chose where the model went. The path is
+  now unlinked first and recreated with `O_EXCL` and `O_NOFOLLOW`, in a 0700
+  directory.
+- **TPM helper output went to fixed names under `/tmp`**, allowing the same
+  symlink and clobber attacks and making two concurrent attestation requests
+  overwrite each other's files. Each invocation now gets a private 0700
+  directory.
+- **`fsync_on_write` did not fsync.** It flushed the `BufWriter` into the page
+  cache and returned, so "log before process" did not survive a power loss.
+- **Audit segments were created world-readable.**
+- **Five attack-detector maps grew without limit.** They are keyed on a client
+  ID, a peer fingerprint, or the digest of a prompt, and `cleanup` pruned only
+  blocks and suspensions — so a client varying its prompt added an entry per
+  request, for the life of the process. Each map is now capacity-bounded, the
+  sweep is rate-limited so admission does not become quadratic, and all of them
+  are pruned.
+- **One client could consume the whole session table** and lock every other
+  client out for the idle timeout, because a session is opened by naming any
+  unused identifier. Clients now get a share of it.
+- **`cordon run --bind 0.0.0.0` published unauthenticated inference.** Plain
+  HTTP, identity from a header any caller can set, behind nothing but a log
+  line. Refused unless `--insecure-bind` says otherwise.
+
+### Correctness fixes
+
+- **Log rotation scrambled the chain.** Segment filenames carried a
+  whole-second timestamp and a random UUID, and every reader walked the
+  directory in filename order — so two rotations inside the same second sorted
+  at random, and the chain was reconstructed out of order and reported broken on
+  a log nobody had touched. Segments now lead with a zero-padded sequence, and
+  readers order by each entry's own sequence rather than by filename.
+- **Two nodes on one audit directory forked the chain.** Both resumed from the
+  highest sequence and both appended; the log then failed verification as though
+  it had been tampered with. A tamper-evident log that cries tamper over an
+  operational slip trains people to disbelieve it, so the directory is now
+  claimed exclusively.
+- **SSE decoding dropped bytes.** A multi-byte character split across TCP reads
+  had its remainder discarded rather than carried into the next read, despite a
+  comment saying otherwise.
+- **The streaming filter was quadratic.** It re-scanned everything received so
+  far on every chunk — at roughly a token per chunk, seconds of CPU per stream
+  at the 32,768-token ceiling. The scan is now strided, and widens as the
+  response grows.
+- **The integrity monitor blocked a tokio worker,** calling a function
+  documented "never directly from an async path" directly from one.
+- **Streaming diverged from the unary path.** Timing normalisation was never
+  applied to a stream, and the audit record logged an empty policy-rule list, so
+  a redacted stream was recorded as though no policy had applied. Streaming is
+  now refused while normalisation is enabled — a stream cannot honour it, since
+  the intervals between chunks carry the signal — and the audit record carries
+  what the filter actually did.
+
+### Made real
+
+- **Per-client content policy.** The filter engine — redact, truncate, block,
+  PII categories, topic keywords — was fully implemented and unreachable from
+  any configuration. Every client on every node got one built-in rule that
+  flagged PII and changed nothing. There is now a `content_policy.default_path`
+  and a per-client `content_policy_path` in the registry, compiled at startup.
+- **`admin_allowed` and `log_export_allowed`.** Both appear in the documented
+  client registry and neither was read, so any authenticated client could read
+  the audit log — which records who asked for what and how often — and any
+  client holding an admin signature could use it.
+- **`outbound_policy`.** Vault, Island and Dark are documented as having no
+  outbound access and nothing checked it. Those modes now require
+  `zero_egress`, and declaring it disables model downloads and refuses a
+  non-loopback runtime endpoint.
+- **Six of the nine audit event types.** Attestation requests, security alerts,
+  tamper findings and log reads went to `tracing` and nowhere else — not
+  hash-chained, not signed, gone with the process. They are recorded now,
+  including every read of the audit log itself.
+
+### Removed
+
+Configuration Cordon did not act on, because a field an operator can set and
+Cordon ignores is a defence they believe they have: `inbound_whitelist`,
+`hardware_firewall`, `smartnic_acl`, `mgmt_channel`,
+`constant_time_enforcement`, `memory_zeroize_on_completion`,
+`response_size_padding` (and the `pad_response` helper it implied, which was
+written, tested, and never called), `re_attestation_interval_hours`,
+`halt_on_attestation_failure`, `cache_partitioning`, `boot.pcr_policy`,
+`client_kv_cache_isolation`, `max_input_tokens`, `audit.log_format`,
+`audit.export_method`, `audit.retention_days`, `signing_key_from_enclave`, the
+whole `[updates]` section, and the HSM provider, slot and PIN fields that
+together looked like PKCS#11 integration. Unknown keys are ignored, so an
+existing configuration still loads — it simply no longer describes anything.
+
+Also removed: `ui/landing_template.html`, `ui/chat.html`, `ui/docs.html`,
+`ui/endpoints.html` and `ui/_shared.css`, which nothing referenced; and
+`tests/integration_tests.rs` at the repository root, which the virtual workspace
+manifest meant was never compiled — 541 lines that looked like coverage and were
+not.
+
+### The operator console
+
+Gains an attestation panel that issues a nonce, requests a report bound to it,
+and reports what that report does and does not establish as four separate facts
+rather than one light — then renders the `[attestation.expected]` block ready to
+paste. And an audit panel: chain head, verdict, recent entries, verify, anchor.
+Both are the API's own handlers mounted on the console listener, so the console
+cannot show an operator something a client would not receive, and its audit
+reads are recorded like anyone's.
+
+### Tests
+
+`cordon-audit`, the crate implementing the tamper-evident chain, had no tests of
+its own. It has seventeen, and one of them found the rotation bug above. The
+workspace suite is 293 tests, up from 170.
+
 ## [2.0.0] — 2026-08-30
 
 First public release. This version replaced several mechanisms that reported

@@ -190,7 +190,7 @@ impl AuditLog {
     /// If the directory is empty or new, creates a genesis entry.
     ///
     /// Claims the directory exclusively: a second node pointed at the same one
-    /// is refused rather than allowed to fork the chain. See [`WriterLock`].
+    /// is refused rather than allowed to fork the chain.
     pub fn open(config: LogConfig, signing_key: SigningKey) -> AuditResult<Self> {
         std::fs::create_dir_all(&config.log_dir)
             .map_err(|e| AuditError::IoError(format!("Cannot create log dir: {}", e)))?;
