@@ -323,6 +323,18 @@ pub struct ProvisionModelRequest {
     pub admin_signature: String,
 }
 
+/// `GET /v1/attestation` query parameters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AttestationQuery {
+    /// A challenge to bind the report to.
+    ///
+    /// Supplying one is what makes the report evidence for *you*: the platform
+    /// quote commits to it, so the report cannot be a replay of one taken
+    /// earlier. Without it the node picks a nonce and the report proves
+    /// freshness only to the node.
+    pub nonce: Option<String>,
+}
+
 // ─── Audit ───────────────────────────────────────────────────────────────────
 
 /// `GET /v1/audit/tail` query parameters.

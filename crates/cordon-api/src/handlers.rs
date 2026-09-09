@@ -597,22 +597,32 @@ fn sign_attestation(
     })
 }
 
-/// `GET /v1/attestation` — a signed report bound to a fresh nonce.
+/// `GET /v1/attestation` — a signed report bound to a nonce.
 ///
-/// The nonce is generated here, so this report proves freshness only to the node
-/// itself. A client wanting evidence for its own challenge should post its own
-/// nonce to `/v1/attestation/verify`.
+/// Pass `?nonce=` to bind the report to a challenge you chose; without one the
+/// node generates a nonce, and the report then proves freshness only to the
+/// node itself. Supplying your own nonce is what makes this endpoint useful for
+/// independent verification: the report carries the signed `TPMS_ATTEST`
+/// structure, the attestation key, and the node's response-signing key, so a
+/// client can run `AttestationReport::verify` against measurements it pinned
+/// itself rather than taking the node's word through `/v1/attestation/verify`.
 pub async fn get_attestation(
     State(state): State<AppState>,
     Extension(vid): Extension<VerifiedIdentity>,
+    Query(query): Query<AttestationQuery>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
     let client = authenticated_client(&state.node, vid)?;
-    let nonce = Uuid::new_v4().to_string();
+    let caller_supplied_nonce = query.nonce.is_some();
+    let nonce = query.nonce.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let report = state
         .node
         .attestation
-        .generate_attestation(&nonce, &state.node.config.node_id)
+        .generate_attestation(
+            &nonce,
+            &state.node.config.node_id,
+            &state.node.enclave_verifying_key_hex(),
+        )
         .map_err(map_err)?;
 
     Ok((
@@ -622,9 +632,17 @@ pub async fn get_attestation(
             "measurement_source": state.node.attestation.measurement_source().to_string(),
             "hardware_measurements": state.node.attestation.has_hardware_measurements(),
             "measurements_are_pinned": state.node.attestation.pinned_measurements().is_some(),
+            "nonce_supplied_by_caller": caller_supplied_nonce,
             "report": report,
             "signature": sign_attestation(&state.node, &report),
             "generated_at": Utc::now(),
+            "verifying_this_yourself": {
+                "challenge": "SHA-256(\"CORDON_ATTEST_CHALLENGE_v1\" || len(key) || key || len(nonce) || nonce)",
+                "note": "The platform quote's extraData equals this challenge, which is \
+                         what binds the report to the key that signs inference responses. \
+                         Recompute it from report.combined.tee_quote.enclave_signing_key_hex \
+                         and the nonce you supplied.",
+            },
         })),
     ))
 }
@@ -637,6 +655,14 @@ pub async fn get_attestation(
 /// be made to verify, because any caller can read the node's own measurements
 /// from `GET /v1/attestation` and hand them straight back. A node with nothing
 /// pinned returns `verified: false` and says so.
+///
+/// Note what this does and does not do. The *node* runs the check, against its
+/// own pinned configuration, and records that this client has attested it. The
+/// client contributes a nonce. A client that wants to reach its own conclusion
+/// should fetch `GET /v1/attestation?nonce=…` and verify the report itself —
+/// the response below reports `hardware_rooted` precisely so the difference
+/// between "the configuration matched" and "a platform quote proved it" is
+/// visible rather than folded into one flag.
 pub async fn verify_attestation(
     State(state): State<AppState>,
     Extension(vid): Extension<VerifiedIdentity>,
@@ -647,7 +673,11 @@ pub async fn verify_attestation(
     let report = state
         .node
         .attestation
-        .generate_attestation(&req.nonce, &state.node.config.node_id)
+        .generate_attestation(
+            &req.nonce,
+            &state.node.config.node_id,
+            &state.node.enclave_verifying_key_hex(),
+        )
         .map_err(map_err)?;
 
     let signature = sign_attestation(&state.node, &report);
@@ -657,7 +687,7 @@ pub async fn verify_attestation(
         .attestation
         .verify_for_client(&report, &req.nonce, &client.client_id)
     {
-        Ok(()) => Ok((
+        Ok(established) => Ok((
             StatusCode::OK,
             Json(serde_json::json!({
                 "verified": true,
@@ -665,6 +695,14 @@ pub async fn verify_attestation(
                 "mrenclave": report.combined.tee_quote.mrenclave,
                 "combined_hash": report.combined.combined_hash,
                 "measurement_source": report.combined.tee_quote.measurement_source,
+                // The distinction that matters: measurements matching is not the
+                // same as a platform having signed for them.
+                "platform_quote": match &established.platform_quote {
+                    cordon_crypto::attestation::PlatformQuoteStatus::Absent => "absent",
+                    cordon_crypto::attestation::PlatformQuoteStatus::Verified { .. } => "verified",
+                },
+                "binds_signing_key": established.binds_signing_key,
+                "hardware_rooted": established.is_hardware_rooted(),
                 "signature": signature,
                 "timestamp": report.combined.generated_at,
             })),
@@ -680,6 +718,7 @@ pub async fn verify_attestation(
                     "mrenclave": report.combined.tee_quote.mrenclave,
                     "combined_hash": report.combined.combined_hash,
                     "measurement_source": report.combined.tee_quote.measurement_source,
+                    "hardware_rooted": false,
                     "report": report,
                     "signature": signature,
                     "timestamp": report.combined.generated_at,

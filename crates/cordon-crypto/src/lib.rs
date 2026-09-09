@@ -11,11 +11,13 @@
 #![cfg_attr(not(test), deny(clippy::expect_used))]
 
 pub mod attestation;
+pub mod canonical;
 pub mod error;
 pub mod hierarchy;
 pub mod kdf;
 pub mod signing;
 pub mod symmetric;
+pub mod tpm2;
 pub mod zeroize_ext;
 
 pub use attestation::{

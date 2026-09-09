@@ -27,18 +27,35 @@
 //! made to verify, since any caller can read the node's own measurements from
 //! `GET /v1/attestation` and hand them straight back. Pinning is what makes the
 //! check mean anything.
+//!
+//! # What `/v1/attestation/verify` really does
+//!
+//! Worth stating plainly, because the endpoint's name suggests more than it
+//! delivers. The node generates a report, checks it against its own pinned
+//! configuration, and records that the calling client has attested it. The
+//! client contributes a nonce; it does not perform the check.
+//!
+//! That is a useful gate — it proves the node is in the state its operator
+//! pinned, at a moment the client chose — but it is not the client verifying
+//! anything. A client that wants its own answer must fetch the report and run
+//! [`AttestationReport::verify`] itself, against measurements it pinned itself.
+//! Everything needed for that now travels in the report: the signed `TPMS_ATTEST`
+//! structure, the attestation key, and the node's response-signing key, all
+//! bound together by the quote's `extraData`. Before, the report carried a
+//! signature with no signed message, and independent verification was not
+//! possible at all.
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::config::{CordonConfig, MeasurementSource, TeePreference};
 use crate::error::{CordonError, CordonResult};
 use cordon_crypto::attestation::{
-    compute_combined_hash, AttestationReport, CombinedAttestation, ExpectedMeasurements, TeeQuote,
-    TeeType, TpmPcrSet, TpmQuote,
+    attestation_challenge, compute_combined_hash, AttestationReport, CombinedAttestation,
+    ExpectedMeasurements, TeeQuote, TeeType, TpmPcrSet, TpmQuote, VerifiedAttestation,
 };
 
 /// PCR register allocations.
@@ -73,13 +90,17 @@ pub struct VerificationRecord {
     pub verified_at: DateTime<Utc>,
     /// Combined hash of the report it accepted.
     pub combined_hash: String,
+    /// What that verification established. Kept so health output can report
+    /// whether clients are being admitted on a hardware-rooted attestation or
+    /// on a configuration digest, rather than reporting only a count.
+    pub established: VerifiedAttestation,
 }
 
 /// Attestation lifecycle manager.
 pub struct AttestationService {
     config: CordonConfig,
     /// Platform measurements, by PCR index.
-    measurements: RwLock<HashMap<u8, String>>,
+    measurements: RwLock<BTreeMap<u8, String>>,
     /// Enclave measurement.
     mrenclave: RwLock<String>,
     /// Signer measurement.
@@ -105,7 +126,7 @@ impl AttestationService {
         let service = Self {
             source: RwLock::new(config.attestation.measurement_source),
             config,
-            measurements: RwLock::new(HashMap::new()),
+            measurements: RwLock::new(BTreeMap::new()),
             mrenclave: RwLock::new(String::new()),
             mrsigner: RwLock::new(String::new()),
             verified_clients: RwLock::new(HashMap::new()),
@@ -144,7 +165,7 @@ impl AttestationService {
         Ok(())
     }
 
-    fn read_tpm_measurements(&self) -> CordonResult<HashMap<u8, String>> {
+    fn read_tpm_measurements(&self) -> CordonResult<BTreeMap<u8, String>> {
         if !crate::tpm::is_available() {
             return Err(CordonError::AttestationInvalid(format!(
                 "attestation.measurement_source is \"tpm2\" but no TPM is reachable. \
@@ -173,7 +194,7 @@ impl AttestationService {
     /// Deterministic for a given node identity and version, so an operator can
     /// pin the values and detect a configuration change. Not a platform
     /// measurement — see the module documentation.
-    fn derive_software_measurements(&self) -> HashMap<u8, String> {
+    fn derive_software_measurements(&self) -> BTreeMap<u8, String> {
         let node_id = &self.config.node_id;
         let deployment_id = &self.config.deployment_id;
         let version = env!("CARGO_PKG_VERSION");
@@ -186,7 +207,7 @@ impl AttestationService {
             format!("sha256:{}", hex::encode(hasher.finalize()))
         };
 
-        let mut m = HashMap::new();
+        let mut m = BTreeMap::new();
         m.insert(
             PcrAllocations::CORDON_RUNTIME,
             derive(
@@ -238,14 +259,20 @@ impl AttestationService {
         tracing::info!("Model manifest measurement extended");
     }
 
-    /// Generate a report bound to a client-supplied nonce.
+    /// Generate a report bound to a client-supplied nonce and to the node's
+    /// response-signing key.
     ///
     /// The nonce is the client's anti-replay guarantee: a report is only fresh
-    /// evidence if it commits to a value the client chose.
+    /// evidence if it commits to a value the client chose. The signing key is
+    /// what makes the report *about this node's answers* — the platform quote
+    /// commits to both together, so a client that verifies the quote learns
+    /// that the key signing its inference responses was resident on the
+    /// platform whose measurements it just checked.
     pub fn generate_attestation(
         &self,
         client_nonce: &str,
         node_id: &str,
+        enclave_signing_key_hex: &str,
     ) -> CordonResult<AttestationReport> {
         if client_nonce.len() < 16 {
             return Err(CordonError::ValidationFailed(
@@ -270,35 +297,44 @@ impl AttestationService {
         let mrsigner = self.mrsigner.read().clone();
         let source = self.measurement_source();
 
+        // The value the TPM will commit to in `extraData`.
+        let challenge = attestation_challenge(enclave_signing_key_hex, client_nonce);
+
         // A TPM-backed report carries a real quote signed by the attestation
-        // key; a software measurement carries none, and says so rather than
-        // manufacturing a value that resembles one.
-        let (aik_public_key_hex, quote_signature_hex, ek_cert_chain) = match source {
-            MeasurementSource::Tpm2 => match crate::tpm::quote(client_nonce) {
-                Ok(quote) => (
-                    quote.aik_public_key_hex,
-                    quote.signature_hex,
-                    quote.ek_cert_chain,
+        // key, together with the structure that was signed — without the
+        // message there is nothing to verify the signature against. A software
+        // measurement carries none of it, and says so rather than manufacturing
+        // values that resemble evidence.
+        let (aik_public_key_hex, attest_message_hex, quote_signature_hex, ek_cert_chain) =
+            match source {
+                MeasurementSource::Tpm2 => match crate::tpm::quote(&challenge) {
+                    Ok(quote) => (
+                        quote.aik_public_key_hex,
+                        quote.message_hex,
+                        quote.signature_hex,
+                        quote.ek_cert_chain,
+                    ),
+                    Err(e) => {
+                        return Err(CordonError::AttestationInvalid(format!(
+                            "TPM quote failed: {}. The node cannot produce a hardware \
+                             attestation report.",
+                            e
+                        )));
+                    }
+                },
+                MeasurementSource::SoftwareMeasurement => (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    vec![base64::engine::general_purpose::STANDARD
+                        .encode(b"NO_HARDWARE_ATTESTATION_KEY")],
                 ),
-                Err(e) => {
-                    return Err(CordonError::AttestationInvalid(format!(
-                        "TPM quote failed: {}. The node cannot produce a hardware \
-                         attestation report.",
-                        e
-                    )));
-                }
-            },
-            MeasurementSource::SoftwareMeasurement => (
-                String::new(),
-                String::new(),
-                vec![base64::engine::general_purpose::STANDARD
-                    .encode(b"NO_HARDWARE_ATTESTATION_KEY")],
-            ),
-        };
+            };
 
         let tpm_quote = TpmQuote {
             pcr_values,
             aik_public_key_hex,
+            attest_message_hex,
             quote_signature_hex,
             nonce: client_nonce.to_string(),
             timestamp: now,
@@ -323,6 +359,7 @@ impl AttestationService {
             )),
             report_signature_b64: String::new(),
             measurement_source: source.to_string(),
+            enclave_signing_key_hex: enclave_signing_key_hex.to_string(),
         };
 
         let combined_hash = compute_combined_hash(&tpm_quote, &tee_quote)
@@ -374,12 +411,17 @@ impl AttestationService {
 
     /// Verify a report against the operator-pinned measurements and, on success,
     /// record that `client_id` has attested this node.
+    ///
+    /// Returns what the check established, so a caller can distinguish a
+    /// hardware-rooted attestation from a configuration digest that happened to
+    /// match. In a hardware mode the two are not interchangeable, and returning
+    /// a bare success would make them look it.
     pub fn verify_for_client(
         &self,
         report: &AttestationReport,
         client_nonce: &str,
         client_id: &str,
-    ) -> CordonResult<()> {
+    ) -> CordonResult<VerifiedAttestation> {
         let expected = self.pinned_measurements().ok_or_else(|| {
             CordonError::AttestationInvalid(
                 "this node has no pinned expected measurements, so an attestation \
@@ -390,9 +432,23 @@ impl AttestationService {
             )
         })?;
 
-        report
+        let established = report
             .verify(&expected, client_nonce)
             .map_err(|e| CordonError::AttestationInvalid(e.to_string()))?;
+
+        // A mode that requires hardware must not admit a client on a report
+        // that carried no platform quote. `CordonConfig::validate` already
+        // refuses a software measurement source outside Light mode, so this is
+        // the second, independent check — the one that would catch a report
+        // whose quote was stripped somewhere between the TPM and here.
+        if self.config.requires_hardware_tee() && !established.platform_quote.is_hardware_verified()
+        {
+            return Err(CordonError::AttestationInvalid(format!(
+                "this report carries no verified platform quote, and {} mode requires \
+                 one. Measurements alone are a claim the node makes about itself.",
+                self.config.mode
+            )));
+        }
 
         self.verified_clients.write().insert(
             client_id.to_string(),
@@ -400,10 +456,28 @@ impl AttestationService {
                 client_id: client_id.to_string(),
                 verified_at: Utc::now(),
                 combined_hash: report.combined.combined_hash.clone(),
+                established: established.clone(),
             },
         );
-        tracing::info!(client_id, "Attestation verified by client");
-        Ok(())
+        tracing::info!(
+            client_id,
+            hardware_rooted = established.is_hardware_rooted(),
+            source = %established.measurement_source,
+            "Attestation verified by client"
+        );
+        Ok(established)
+    }
+
+    /// How many live verifications rest on a verified hardware quote that also
+    /// binds this node's signing key.
+    pub fn hardware_rooted_client_count(&self) -> usize {
+        let interval = chrono::Duration::hours(self.config.attestation.interval_hours as i64);
+        let now = Utc::now();
+        self.verified_clients
+            .read()
+            .values()
+            .filter(|r| now - r.verified_at < interval && r.established.is_hardware_rooted())
+            .count()
     }
 
     /// Whether `client_id` has verified this node within the re-attestation
@@ -466,7 +540,7 @@ impl AttestationService {
     }
 
     /// The current measurements, for `cordon attest --pin`.
-    pub fn current_measurements(&self) -> HashMap<u8, String> {
+    pub fn current_measurements(&self) -> BTreeMap<u8, String> {
         self.measurements.read().clone()
     }
 
@@ -489,6 +563,11 @@ mod tests {
         AttestationService::new(config).unwrap()
     }
 
+    /// Stands in for the node's response-signing public key. Reports commit to
+    /// it, so it has to be stable across a test's calls.
+    const TEST_SIGNING_KEY: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+
     fn nonce() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -502,7 +581,9 @@ mod tests {
         );
         assert!(!service.has_hardware_measurements());
 
-        let report = service.generate_attestation(&nonce(), "node-1").unwrap();
+        let report = service
+            .generate_attestation(&nonce(), "node-1", TEST_SIGNING_KEY)
+            .unwrap();
         assert_eq!(
             report.combined.tee_quote.measurement_source,
             "software_measurement"
@@ -515,7 +596,9 @@ mod tests {
     #[test]
     fn short_nonces_are_refused() {
         let service = service_with(None);
-        assert!(service.generate_attestation("short", "node-1").is_err());
+        assert!(service
+            .generate_attestation("short", "node-1", TEST_SIGNING_KEY)
+            .is_err());
     }
 
     /// The bypass this design exists to prevent: read the node's own
@@ -524,7 +607,9 @@ mod tests {
     fn a_node_without_pinned_measurements_cannot_be_verified() {
         let service = service_with(None);
         let n = nonce();
-        let report = service.generate_attestation(&n, "node-1").unwrap();
+        let report = service
+            .generate_attestation(&n, "node-1", TEST_SIGNING_KEY)
+            .unwrap();
 
         let err = service
             .verify_for_client(&report, &n, "attacker")
@@ -556,7 +641,9 @@ mod tests {
         let service = AttestationService::new(config).unwrap();
 
         let n = nonce();
-        let report = service.generate_attestation(&n, "node-1").unwrap();
+        let report = service
+            .generate_attestation(&n, "node-1", TEST_SIGNING_KEY)
+            .unwrap();
         service.verify_for_client(&report, &n, "alice").unwrap();
         assert!(service.is_verified_by("alice"));
         // Verification is per-client: Alice's success is not Bob's.
@@ -570,7 +657,9 @@ mod tests {
             ..ExpectedMeasurementsConfig::default()
         }));
         let n = nonce();
-        let report = service.generate_attestation(&n, "node-1").unwrap();
+        let report = service
+            .generate_attestation(&n, "node-1", TEST_SIGNING_KEY)
+            .unwrap();
         assert!(service.verify_for_client(&report, &n, "alice").is_err());
         assert!(!service.is_verified_by("alice"));
     }
@@ -588,7 +677,9 @@ mod tests {
         });
         let service = AttestationService::new(config).unwrap();
 
-        let report = service.generate_attestation(&nonce(), "node-1").unwrap();
+        let report = service
+            .generate_attestation(&nonce(), "node-1", TEST_SIGNING_KEY)
+            .unwrap();
         assert!(service
             .verify_for_client(&report, &nonce(), "alice")
             .is_err());
