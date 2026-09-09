@@ -134,7 +134,19 @@ pub fn verify_log_chain(
     })
 }
 
-/// Load entries from a path (file or directory)
+/// Load every entry from a path (a single segment, or a directory of them),
+/// ordered by the chain's own sequence numbers.
+///
+/// Ordering by sequence rather than by filename is what makes verification
+/// independent of how segments happen to be named. A verifier that walked the
+/// directory in filename order would report a perfectly intact log as broken
+/// whenever two segments sorted the wrong way round — and, worse, would give an
+/// operator a way to make a log look tampered with, or a tampered log look
+/// merely misnamed, by renaming files.
+///
+/// This does not let an operator reorder the log: the caller still checks that
+/// each entry's hash chains to its predecessor, so a renumbered log fails on
+/// the hash chain instead of being silently accepted in the new order.
 fn load_entries(path: &Path) -> AuditResult<Vec<AuditEntry>> {
     let mut all_entries = Vec::new();
 
@@ -154,6 +166,7 @@ fn load_entries(path: &Path) -> AuditResult<Vec<AuditEntry>> {
         all_entries = load_entries_from_file(path)?;
     }
 
+    all_entries.sort_by_key(|e| e.sequence);
     Ok(all_entries)
 }
 

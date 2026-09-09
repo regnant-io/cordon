@@ -13,6 +13,9 @@ pub mod export;
 pub mod log;
 pub mod verify;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::{AuditError, AuditResult};
 pub use events::{
     AdminEvent, AlertSeverity, AlertType, AttestationEvent, AttestationTrigger, AuditEvent,

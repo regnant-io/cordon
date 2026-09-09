@@ -705,9 +705,7 @@ impl ModelStore {
             entry.status = BundleStatus::Staging;
         }
 
-        std::fs::create_dir_all(staging_dir).map_err(|e| {
-            CordonError::Internal(format!("cannot create staging directory: {}", e))
-        })?;
+        create_private_dir(staging_dir)?;
 
         let staged_path = staging_dir.join(format!("{}.staged", bundle_id));
         let file = create_private_file(&staged_path)?;
@@ -862,20 +860,91 @@ impl Drop for StagedModel {
     }
 }
 
-/// Create a file readable and writable only by the current user.
+/// Create the staging directory, restricted to the current user.
+///
+/// The staging location the documentation recommends is a shared memory-backed
+/// filesystem such as `/dev/shm`, which is world-writable. Narrowing the
+/// directory is the first of two defences; [`create_private_file`] is the
+/// second, and does not depend on this one succeeding.
+fn create_private_dir(path: &Path) -> CordonResult<()> {
+    std::fs::create_dir_all(path)
+        .map_err(|e| CordonError::Internal(format!("cannot create staging directory: {}", e)))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)) {
+            tracing::warn!(
+                path = %path.display(),
+                "cannot restrict the staging directory to this user: {}. Decrypted \
+                 weights are still written owner-only, but the directory itself is \
+                 readable by others.",
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Create a file readable and writable only by the current user, refusing to
+/// write through anything that already exists at that path.
+///
+/// This is the step that keeps decrypted weights off an attacker's disk. The
+/// naive form — `create(true).truncate(true).mode(0o600)` — has two holes on a
+/// shared staging directory:
+///
+/// * `mode` applies only when the file is *created*. A world-readable file
+///   pre-created at the same path is opened and truncated with its permissions
+///   intact, and the plaintext model is written into it.
+/// * `open` follows symlinks, so a pre-created symlink redirects the entire
+///   decrypted model to a path of the attacker's choosing.
+///
+/// Both are closed by unlinking any existing entry first — `remove_file` removes
+/// a symlink rather than following it — and then creating the file with
+/// `O_EXCL`, which fails outright if anything raced back in between.
 fn create_private_file(path: &Path) -> CordonResult<std::fs::File> {
+    // Clearing a stale file is deliberate: the staged path is derived from the
+    // bundle ID, so a crashed load leaves one behind and a plain `create_new`
+    // would refuse forever. Anything planted here is removed as a directory
+    // entry, never opened.
+    match std::fs::remove_file(path) {
+        Ok(()) => tracing::debug!(
+            path = %path.display(),
+            "Cleared an existing staging entry before decrypting"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CordonError::Internal(format!(
+                "cannot clear the staging path {}: {}",
+                path.display(),
+                e
+            )));
+        }
+    }
+
     let mut options = std::fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
+    // `create_new` implies O_EXCL: if anything exists at this path — including a
+    // symlink planted between the unlink above and this call — the open fails
+    // rather than writing plaintext weights somewhere unintended.
+    options.create_new(true).write(true);
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        // O_EXCL already refuses an existing symlink. O_NOFOLLOW states the
+        // intent explicitly and costs nothing.
+        options.custom_flags(o_nofollow());
     }
 
-    let file = options
-        .open(path)
-        .map_err(|e| CordonError::Internal(format!("cannot create {}: {}", path.display(), e)))?;
+    let file = options.open(path).map_err(|e| {
+        CordonError::Internal(format!(
+            "cannot create the staging file {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
 
     // Windows has no mode bits; the file inherits the directory ACL. Staging
     // directories are created under the node's data directory, which the
@@ -889,6 +958,32 @@ fn create_private_file(path: &Path) -> CordonResult<std::fs::File> {
     }
 
     Ok(file)
+}
+
+/// `O_NOFOLLOW` for the Unix targets Cordon builds for.
+///
+/// Spelled out rather than pulled from `libc`, which is not otherwise a
+/// dependency of this workspace. A target whose value is not known here gets
+/// zero, which is a no-op — `O_EXCL` is still doing the real work.
+#[cfg(unix)]
+fn o_nofollow() -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        0o400_000
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    {
+        0x0100
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd"
+    )))]
+    {
+        0
+    }
 }
 
 /// SHA-256 a file in constant memory.
@@ -1145,6 +1240,76 @@ mod tests {
             assert!(path.exists());
         }
         assert!(!path.exists(), "staged plaintext must be erased on drop");
+    }
+
+    /// A pre-created world-readable file must not be reused: `mode(0o600)`
+    /// applies only on creation, so opening one would write the decrypted model
+    /// into a file anyone can read.
+    #[test]
+    fn staging_replaces_a_pre_created_file_rather_than_writing_into_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weights.staged");
+        std::fs::write(&path, b"planted by someone else").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        }
+
+        let mut file = create_private_file(&path).unwrap();
+        use std::io::Write as _;
+        file.write_all(b"weights").unwrap();
+        drop(file);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"weights");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "staged plaintext mode was {:o}", mode);
+        }
+    }
+
+    /// The attack this closes: a symlink planted at the staging path would
+    /// otherwise redirect the entire decrypted model to a path of the
+    /// attacker's choosing.
+    #[cfg(unix)]
+    #[test]
+    fn staging_never_writes_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("attacker-owned");
+        let link = dir.path().join("weights.staged");
+        std::fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut file = create_private_file(&link).unwrap();
+        use std::io::Write as _;
+        file.write_all(b"weights").unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"original",
+            "decrypted weights were written through a symlink"
+        );
+        assert_eq!(std::fs::read(&link).unwrap(), b"weights");
+        assert!(!std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_staging_directory_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        create_private_dir(&staging).unwrap();
+        let mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "staging directory mode was {:o}", mode);
     }
 
     #[test]

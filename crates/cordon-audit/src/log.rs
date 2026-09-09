@@ -37,7 +37,14 @@ pub struct LogConfig {
     pub node_id: String,
     /// Maximum log file size before rotation (bytes)
     pub max_file_size_bytes: u64,
-    /// Whether to fsync after every write (performance vs durability trade-off)
+    /// Whether each entry is flushed *and* fsynced before `append` returns.
+    ///
+    /// This is what makes "log before process" survive a crash. Flushing alone
+    /// only moves the entry out of Cordon's buffer into the kernel's page
+    /// cache, where a power loss still discards it — and a request that was
+    /// served but whose intake record was lost is exactly the gap the
+    /// log-before-process rule exists to close. Durability costs one fsync per
+    /// request; turn it off only where that is understood and accepted.
     pub fsync_on_write: bool,
 }
 
@@ -121,17 +128,13 @@ impl AuditLog {
             Some((path, last_hash, seq)) => (path, last_hash, seq),
             None => {
                 // Create new log file with genesis entry
-                let path = self.new_log_file_path();
+                let path = self.new_log_file_path(1);
                 let genesis_hash = self.compute_genesis_hash();
                 (path, genesis_hash, 0u64)
             }
         };
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .map_err(|e| AuditError::IoError(format!("Cannot open log file: {}", e)))?;
+        let file = open_log_file(&file_path)?;
 
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
 
@@ -223,10 +226,18 @@ impl AuditLog {
             .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
 
         if self.config.fsync_on_write {
+            // Both steps are required. `flush` empties Cordon's BufWriter into
+            // the kernel; `sync_data` is what puts the bytes on the device. A
+            // flush alone leaves the entry in the page cache, where a power loss
+            // discards it — and the caller has already been told the request was
+            // logged.
             state
                 .writer
                 .flush()
                 .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
+            state.writer.get_ref().sync_data().map_err(|e| {
+                AuditError::WriteFailed(format!("cannot fsync the audit log: {}", e))
+            })?;
         }
 
         state.bytes_written += bytes.len() as u64;
@@ -268,43 +279,51 @@ impl AuditLog {
         hex::encode(hasher.finalize())
     }
 
-    /// Find the most recent existing log file and read its last entry
+    /// Find the segment holding the highest sequence number, and resume from it.
+    ///
+    /// The file to resume into is chosen by reading each segment's last entry
+    /// and taking the greatest sequence, not by sorting filenames. Filename
+    /// order is a property of how a name was formatted; sequence order is a
+    /// property of the chain itself, and only the second one is guaranteed to
+    /// be the order the entries were written in.
     fn find_existing_log_file(&self) -> AuditResult<Option<(PathBuf, String, u64)>> {
-        let mut log_files: Vec<PathBuf> = std::fs::read_dir(&self.config.log_dir)
-            .map_err(|e| AuditError::IoError(e.to_string()))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
-            .collect();
+        let mut newest: Option<(PathBuf, String, u64)> = None;
 
-        if log_files.is_empty() {
-            return Ok(None);
-        }
-
-        log_files.sort();
-        let latest = log_files.last().unwrap().clone();
-
-        // Read last line to get last entry
-        let content =
-            std::fs::read_to_string(&latest).map_err(|e| AuditError::IoError(e.to_string()))?;
-        let last_line = content.lines().last();
-
-        match last_line {
-            None => Ok(None),
-            Some(line) => {
-                let entry: AuditEntry = serde_json::from_str(line)
-                    .map_err(|e| AuditError::SerializationError(e.to_string()))?;
-                Ok(Some((latest, entry.entry_hash, entry.sequence)))
+        for path in self.log_files()? {
+            let Some(entry) = read_last_entry(&path)? else {
+                continue; // An empty segment carries no chain state.
+            };
+            let replace = match &newest {
+                Some((_, _, seq)) => entry.sequence > *seq,
+                None => true,
+            };
+            if replace {
+                newest = Some((path, entry.entry_hash, entry.sequence));
             }
         }
+
+        Ok(newest)
     }
 
-    /// Create a new log file path with timestamp
-    fn new_log_file_path(&self) -> PathBuf {
+    /// Build the path for a new segment beginning at `first_sequence`.
+    ///
+    /// The sequence number leads the name, zero-padded to a fixed width, so
+    /// segments sort into chain order as plain strings. An earlier format put
+    /// only a whole-second timestamp and a random UUID in the name; two
+    /// rotations inside the same second then sorted by the UUID, which is to
+    /// say at random, and every reader that walked the directory in filename
+    /// order reconstructed the chain out of order and reported it as broken.
+    /// The timestamp is retained after the sequence for human legibility, and
+    /// a short random suffix keeps two writers from colliding on one name.
+    fn new_log_file_path(&self, first_sequence: u64) -> PathBuf {
         let ts = Utc::now().format("%Y%m%dT%H%M%S");
-        self.config
-            .log_dir
-            .join(format!("cordon-audit-{}-{}.jsonl", ts, Uuid::new_v4()))
+        let unique = Uuid::new_v4().simple().to_string();
+        self.config.log_dir.join(format!(
+            "cordon-audit-{:020}-{}-{}.jsonl",
+            first_sequence,
+            ts,
+            &unique[..8]
+        ))
     }
 
     /// Rotate the log file (called when current file exceeds max size)
@@ -315,13 +334,10 @@ impl AuditLog {
             .flush()
             .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
 
-        // Open new file
-        let new_path = self.new_log_file_path();
-        let new_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&new_path)
-            .map_err(|e| AuditError::IoError(format!("Cannot create rotated log: {}", e)))?;
+        // The new segment is named for the sequence it will begin at, which is
+        // one past the entry just written.
+        let new_path = self.new_log_file_path(state.sequence + 1);
+        let new_file = open_log_file(&new_path)?;
 
         state.writer = BufWriter::new(new_file);
         state.current_file = new_path;
@@ -333,10 +349,10 @@ impl AuditLog {
 
     /// Read the most recent `n` entries without loading the whole log.
     ///
-    /// Files are visited newest-first and each is read only until enough
+    /// Segments are visited newest-first and each is read only until enough
     /// entries have been collected, so tailing a multi-gigabyte log costs the
-    /// size of its newest segment rather than the size of the log. The result is
-    /// in chronological order.
+    /// size of its newest segments rather than the size of the log. The result
+    /// is in chain order.
     pub fn read_tail_entries(&self, n: usize) -> AuditResult<Vec<AuditEntry>> {
         if n == 0 {
             return Ok(Vec::new());
@@ -369,7 +385,9 @@ impl AuditLog {
             }
         }
 
-        collected.reverse();
+        // Order by the chain's own sequence rather than by the order segments
+        // happened to be visited in.
+        collected.sort_by_key(|e| e.sequence);
         Ok(collected)
     }
 
@@ -384,7 +402,12 @@ impl AuditLog {
         Ok(total)
     }
 
-    /// Every log file in the directory, in chronological (filename) order.
+    /// Every log segment in the directory, in filename order.
+    ///
+    /// Filenames lead with a zero-padded sequence number, so this is chain
+    /// order for any segment this version wrote. It is a hint rather than a
+    /// guarantee — readers sort by each entry's own sequence afterwards, so a
+    /// renamed or externally-produced segment cannot reorder the chain.
     fn log_files(&self) -> AuditResult<Vec<PathBuf>> {
         let mut files: Vec<PathBuf> = std::fs::read_dir(&self.config.log_dir)
             .map_err(|e| AuditError::IoError(e.to_string()))?
@@ -396,7 +419,12 @@ impl AuditLog {
         Ok(files)
     }
 
-    /// Read every entry from every log file.
+    /// The directory this log writes to.
+    pub fn log_dir(&self) -> &std::path::Path {
+        &self.config.log_dir
+    }
+
+    /// Read every entry from every log segment, in chain order.
     ///
     /// Linear in the size of the log — use [`Self::read_tail_entries`] on any
     /// request path.
@@ -415,6 +443,89 @@ impl AuditLog {
             }
         }
 
+        entries.sort_by_key(|e| e.sequence);
         Ok(entries)
     }
+}
+
+/// Read the last entry of a segment without loading the whole file.
+///
+/// Segments are capped at `max_file_size_bytes`, which defaults to 512 MB, so
+/// reading one in full just to see its final line would make opening a log
+/// proportional to the size of the log. The file is instead read backwards in
+/// blocks until a complete final line is in hand.
+fn read_last_entry(path: &PathBuf) -> AuditResult<Option<AuditEntry>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const BLOCK: usize = 64 * 1024;
+
+    let mut file = File::open(path).map_err(|e| AuditError::IoError(e.to_string()))?;
+    let len = file
+        .metadata()
+        .map_err(|e| AuditError::IoError(e.to_string()))?
+        .len();
+    if len == 0 {
+        return Ok(None);
+    }
+
+    let mut tail: Vec<u8> = Vec::new();
+    let mut read_from = len;
+
+    loop {
+        let block = BLOCK.min(read_from as usize);
+        read_from -= block as u64;
+
+        let mut buf = vec![0u8; block];
+        file.seek(SeekFrom::Start(read_from))
+            .map_err(|e| AuditError::IoError(e.to_string()))?;
+        file.read_exact(&mut buf)
+            .map_err(|e| AuditError::IoError(e.to_string()))?;
+
+        buf.extend_from_slice(&tail);
+        tail = buf;
+
+        // A complete final line needs a newline before it, unless we have
+        // reached the start of the file.
+        let text = String::from_utf8_lossy(&tail);
+        let last = text.lines().rfind(|l| !l.trim().is_empty());
+        let have_complete_line = tail.contains(&b'\n') || read_from == 0;
+
+        if let Some(line) = last {
+            if have_complete_line {
+                return serde_json::from_str::<AuditEntry>(line)
+                    .map(Some)
+                    .map_err(|e| {
+                        AuditError::SerializationError(format!(
+                            "last entry of {:?} is unreadable: {}",
+                            path, e
+                        ))
+                    });
+            }
+        }
+
+        if read_from == 0 {
+            return Ok(None);
+        }
+    }
+}
+
+/// Open a log file for appending, readable only by the account running Cordon.
+///
+/// Entries carry client identifiers, model identifiers, token counts, and
+/// policy outcomes. None of that is secret in the way a key is, but none of it
+/// belongs to every local account either, and the default umask would make it
+/// world-readable.
+fn open_log_file(path: &PathBuf) -> AuditResult<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    options
+        .open(path)
+        .map_err(|e| AuditError::IoError(format!("Cannot open log file {:?}: {}", path, e)))
 }

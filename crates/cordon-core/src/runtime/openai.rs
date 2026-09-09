@@ -205,60 +205,74 @@ impl InferenceBackend for OpenAiBackend {
         let byte_stream = response.bytes_stream();
 
         // Server-sent events arrive as `data: {json}` records separated by blank
-        // lines, terminated by `data: [DONE]`. Records can be split across TCP
-        // reads, so a buffer is carried between chunks.
+        // lines, terminated by `data: [DONE]`. Both a record and a single UTF-8
+        // character can be split across TCP reads, so two buffers are carried
+        // between chunks: `pending` holds bytes that are not yet a whole
+        // character, and `buffer` holds decoded text that is not yet a whole
+        // record.
         let stream = futures::stream::unfold(
-            (byte_stream, String::new(), SseState::default()),
-            |(mut bytes, mut buffer, mut state)| async move {
+            (
+                byte_stream,
+                String::new(),
+                Vec::<u8>::new(),
+                SseState::default(),
+            ),
+            |(mut bytes, mut buffer, mut pending, mut state)| async move {
                 loop {
                     // Drain anything already buffered before reading more.
                     if let Some(event) = take_event(&mut buffer) {
                         match parse_sse_event(&event, &mut state) {
                             SseOutcome::Chunk(chunk) => {
-                                return Some((Ok(chunk), (bytes, buffer, state)))
+                                return Some((Ok(chunk), (bytes, buffer, pending, state)))
                             }
                             SseOutcome::Finished => {
                                 let done = StreamChunk::Done {
                                     finish_reason: state.finish_reason,
                                     usage: state.usage,
                                 };
-                                return Some((Ok(done), (bytes, buffer, state)));
+                                return Some((Ok(done), (bytes, buffer, pending, state)));
                             }
                             SseOutcome::Continue => continue,
                         }
                     }
 
                     match bytes.next().await {
-                        Some(Ok(part)) => match std::str::from_utf8(&part) {
-                            Ok(text) => buffer.push_str(text),
-                            Err(_) => {
-                                // A multi-byte character split across reads is
-                                // normal; append lossily only the valid prefix
-                                // and keep the remainder for the next read.
-                                let valid_up_to = match std::str::from_utf8(&part) {
-                                    Ok(_) => part.len(),
-                                    Err(e) => e.valid_up_to(),
-                                };
-                                buffer.push_str(&String::from_utf8_lossy(&part[..valid_up_to]));
-                            }
-                        },
+                        Some(Ok(part)) => {
+                            pending.extend_from_slice(&part);
+                            decode_utf8_prefix(&mut pending, &mut buffer);
+                        }
                         Some(Err(e)) => {
                             let err = CordonError::InferenceFailed(format!(
                                 "model runtime stream failed: {}",
                                 e
                             ));
-                            return Some((Err(err), (bytes, buffer, state)));
+                            return Some((Err(err), (bytes, buffer, pending, state)));
                         }
                         None => {
                             if state.terminated {
                                 return None;
+                            }
+                            // Trailing bytes that never completed a character
+                            // are the runtime truncating mid-stream. Surface
+                            // them as replacement characters rather than
+                            // silently discarding output.
+                            if !pending.is_empty() {
+                                buffer.push_str(&String::from_utf8_lossy(&pending));
+                                pending.clear();
+                                if let Some(event) = take_event(&mut buffer) {
+                                    if let SseOutcome::Chunk(chunk) =
+                                        parse_sse_event(&event, &mut state)
+                                    {
+                                        return Some((Ok(chunk), (bytes, buffer, pending, state)));
+                                    }
+                                }
                             }
                             state.terminated = true;
                             let done = StreamChunk::Done {
                                 finish_reason: state.finish_reason,
                                 usage: state.usage,
                             };
-                            return Some((Ok(done), (bytes, buffer, state)));
+                            return Some((Ok(done), (bytes, buffer, pending, state)));
                         }
                     }
                 }
@@ -313,6 +327,45 @@ enum SseOutcome {
     Chunk(StreamChunk),
     Finished,
     Continue,
+}
+
+/// Move every complete UTF-8 character out of `pending` and into `text`.
+///
+/// A read can end in the middle of a multi-byte character. Those trailing bytes
+/// stay in `pending` for the next read to complete — dropping them, or replacing
+/// them with U+FFFD, would corrupt the model's output at an arbitrary TCP
+/// boundary. Bytes that are genuinely invalid (not merely incomplete) are
+/// consumed as one replacement character so a malformed stream cannot wedge the
+/// decoder.
+fn decode_utf8_prefix(pending: &mut Vec<u8>, text: &mut String) {
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(valid) => {
+                text.push_str(valid);
+                pending.clear();
+                return;
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                // SAFETY-free: `valid_up_to` is by definition a boundary of a
+                // well-formed prefix, so this slice is valid UTF-8.
+                text.push_str(&String::from_utf8_lossy(&pending[..valid_up_to]));
+
+                match e.error_len() {
+                    // An incomplete trailing character: keep it for the next read.
+                    None => {
+                        pending.drain(..valid_up_to);
+                        return;
+                    }
+                    // Genuinely invalid bytes: consume them and keep going.
+                    Some(bad) => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        pending.drain(..valid_up_to + bad);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Pull one complete SSE record off the front of `buffer`, if one is present.
@@ -496,6 +549,53 @@ mod tests {
             SseOutcome::Finished
         ));
         assert!(state.terminated);
+    }
+
+    /// The regression this decoder exists to prevent: a character split across
+    /// two TCP reads must arrive whole, not truncated and not mangled.
+    #[test]
+    fn a_character_split_across_reads_is_reassembled() {
+        let source = "日本語のテキスト";
+        let bytes = source.as_bytes();
+
+        // Split at every byte offset, including the ones mid-character.
+        for split in 1..bytes.len() {
+            let mut pending = Vec::new();
+            let mut text = String::new();
+
+            pending.extend_from_slice(&bytes[..split]);
+            decode_utf8_prefix(&mut pending, &mut text);
+            pending.extend_from_slice(&bytes[split..]);
+            decode_utf8_prefix(&mut pending, &mut text);
+
+            assert_eq!(text, source, "corrupted when split at byte {}", split);
+            assert!(pending.is_empty(), "bytes left over at split {}", split);
+        }
+    }
+
+    #[test]
+    fn an_incomplete_trailing_character_is_held_not_dropped() {
+        let mut pending = vec![0xE6, 0x97]; // first two bytes of '日'
+        let mut text = String::new();
+        decode_utf8_prefix(&mut pending, &mut text);
+        assert_eq!(text, "");
+        assert_eq!(pending, vec![0xE6, 0x97]);
+
+        pending.push(0xA5);
+        decode_utf8_prefix(&mut pending, &mut text);
+        assert_eq!(text, "日");
+        assert!(pending.is_empty());
+    }
+
+    /// Invalid bytes must be consumed rather than held, or a malformed stream
+    /// would stall the decoder for the rest of the response.
+    #[test]
+    fn invalid_bytes_do_not_wedge_the_decoder() {
+        let mut pending = vec![b'a', 0xFF, 0xFE, b'b'];
+        let mut text = String::new();
+        decode_utf8_prefix(&mut pending, &mut text);
+        assert!(pending.is_empty());
+        assert!(text.starts_with('a') && text.ends_with('b'));
     }
 
     #[test]

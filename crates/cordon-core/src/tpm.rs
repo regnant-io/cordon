@@ -103,58 +103,75 @@ pub fn quote(nonce: &str) -> CordonResult<TpmQuoteResult> {
 
     let selection = pcr_selection(crate::attestation_service::PcrAllocations::ALL);
 
-    // Temporary files are named from the qualifying digest, which is derived
-    // from a client nonce, so concurrent quotes cannot collide.
-    let dir = std::env::temp_dir();
-    let msg_path = dir.join(format!("cordon-quote-{}.msg", &qualifying_data[..16]));
-    let sig_path = dir.join(format!("cordon-quote-{}.sig", &qualifying_data[..16]));
+    // `tpm2_quote` writes its output to paths Cordon names, so those paths must
+    // be ones no other local user can pre-create, redirect, or read. A
+    // per-invocation private directory gives all three: it is created with
+    // `O_EXCL` under a random name, restricted to this user, and removed with
+    // its contents when the quote returns.
+    let workspace = private_workspace()?;
+    let msg_path = workspace.path().join("quote.msg");
+    let sig_path = workspace.path().join("quote.sig");
     let msg_str = msg_path.to_string_lossy().into_owned();
     let sig_str = sig_path.to_string_lossy().into_owned();
 
-    let result = (|| -> CordonResult<TpmQuoteResult> {
-        run(&[
-            "tpm2_quote",
-            "-c",
-            &ak_ctx,
-            "-l",
-            &selection,
-            "-q",
-            &qualifying_data,
-            "-m",
-            &msg_str,
-            "-s",
-            &sig_str,
-            "-g",
-            "sha256",
-        ])?;
+    run(&[
+        "tpm2_quote",
+        "-c",
+        &ak_ctx,
+        "-l",
+        &selection,
+        "-q",
+        &qualifying_data,
+        "-m",
+        &msg_str,
+        "-s",
+        &sig_str,
+        "-g",
+        "sha256",
+    ])?;
 
-        let message = std::fs::read(&msg_path).map_err(|e| {
-            CordonError::AttestationInvalid(format!("cannot read quote message: {}", e))
-        })?;
-        let signature = std::fs::read(&sig_path).map_err(|e| {
-            CordonError::AttestationInvalid(format!("cannot read quote signature: {}", e))
-        })?;
+    let message = std::fs::read(&msg_path).map_err(|e| {
+        CordonError::AttestationInvalid(format!("cannot read quote message: {}", e))
+    })?;
+    let signature = std::fs::read(&sig_path).map_err(|e| {
+        CordonError::AttestationInvalid(format!("cannot read quote signature: {}", e))
+    })?;
 
-        Ok(TpmQuoteResult {
-            message_hex: hex::encode(message),
-            signature_hex: hex::encode(signature),
-            aik_public_key_hex: read_ak_public(&ak_ctx).unwrap_or_default(),
-            ek_cert_chain: read_ek_certificate_chain(),
+    Ok(TpmQuoteResult {
+        message_hex: hex::encode(message),
+        signature_hex: hex::encode(signature),
+        aik_public_key_hex: read_ak_public(&ak_ctx).unwrap_or_default(),
+        ek_cert_chain: read_ek_certificate_chain(),
+    })
+    // `workspace` drops here, removing both files.
+}
+
+/// A private, per-invocation directory for `tpm2-tools` output files.
+///
+/// `tempfile::TempDir` creates with a random name and mode 0700 on Unix, so a
+/// local attacker can neither pre-create the path (which would let them plant a
+/// symlink and choose where the quote is written) nor read what lands in it.
+/// Earlier revisions used fixed names under `/tmp`, which allowed both, and also
+/// made two concurrent attestation requests overwrite each other's files.
+fn private_workspace() -> CordonResult<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("cordon-tpm-")
+        .tempdir()
+        .map_err(|e| {
+            CordonError::AttestationInvalid(format!(
+                "cannot create a private directory for TPM output: {}",
+                e
+            ))
         })
-    })();
-
-    let _ = std::fs::remove_file(&msg_path);
-    let _ = std::fs::remove_file(&sig_path);
-    result
 }
 
 /// Read the attestation key's public area.
 fn read_ak_public(ak_ctx: &str) -> Option<String> {
-    let dir = std::env::temp_dir();
-    let out_path = dir.join("cordon-ak-public.bin");
+    let workspace = private_workspace().ok()?;
+    let out_path = workspace.path().join("ak-public.bin");
     let out_str = out_path.to_string_lossy().into_owned();
 
-    let result = run(&[
+    run(&[
         "tpm2_readpublic",
         "-c",
         ak_ctx,
@@ -165,29 +182,25 @@ fn read_ak_public(ak_ctx: &str) -> Option<String> {
     ])
     .ok()
     .and_then(|_| std::fs::read(&out_path).ok())
-    .map(hex::encode);
-
-    let _ = std::fs::remove_file(&out_path);
-    result
+    .map(hex::encode)
 }
 
 /// Read the endorsement key certificate from NV storage, when the platform
 /// stores one there. Absence is normal on many systems and is not an error.
 fn read_ek_certificate_chain() -> Vec<String> {
     use base64::Engine;
-    let dir = std::env::temp_dir();
-    let out_path = dir.join("cordon-ek-cert.der");
+    let Ok(workspace) = private_workspace() else {
+        return Vec::new();
+    };
+    let out_path = workspace.path().join("ek-cert.der");
     let out_str = out_path.to_string_lossy().into_owned();
 
     // 0x01c00002 is the TCG-registered NV index for the RSA EK certificate.
-    let chain = run(&["tpm2_nvread", "0x01c00002", "-o", &out_str])
+    run(&["tpm2_nvread", "0x01c00002", "-o", &out_str])
         .ok()
         .and_then(|_| std::fs::read(&out_path).ok())
         .map(|der| vec![base64::engine::general_purpose::STANDARD.encode(der)])
-        .unwrap_or_default();
-
-    let _ = std::fs::remove_file(&out_path);
-    chain
+        .unwrap_or_default()
 }
 
 fn pcr_selection(indices: &[u8]) -> String {

@@ -21,3 +21,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand = { workspace = true }
