@@ -39,3 +39,10 @@ secrets/
 *~
 .DS_Store
 Thumbs.db
+
+# Vendored llama.cpp checkout, when built locally. It is an upstream git
+# repository in its own right and must never be committed into this one.
+/llama.cpp/
+
+# Local scratch
+/test.json
