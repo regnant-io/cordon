@@ -31,6 +31,39 @@ owns it.
   signatures over genuinely formatted structures, every refusal path covered.
   **Not yet run against real silicon.** See `SECURITY.md`.
 
+### AWS Nitro Enclaves — the verifier, and an honest account of the rest
+
+`attestation.expected.nitro` pins an AWS Nitro root and a set of PCRs, and
+Cordon will verify an attestation document against them: the COSE_Sign1
+envelope, the ES384 signature over the `Sig_structure` (not the payload — a
+signature that did not cover the protected header would let an attacker rewrite
+the algorithm after the fact), the certificate chain to the pinned root, the
+PCRs, the challenge binding, and a freshness bound. Each is reported as a
+separate fact, because "correctly signed by the wrong party" and "genuine
+hardware running the wrong image" call for different responses.
+
+The CBOR reader is written here rather than taken from a crate, for the same
+reason the canonical encoder is: an attestation document is parsed *before* its
+signature can be checked, which makes it the most hostile input Cordon accepts.
+The reader refuses indefinite-length items, checks every declared length against
+the bytes actually remaining before allocating, bounds depth and item count,
+refuses trailing bytes and duplicate keys, and accepts only the shapes a Nitro
+document uses. A general-purpose decoder is built to accept everything legal; a
+verifier wants the opposite.
+
+**Cordon cannot run inside a Nitro Enclave, and says so at startup.** An enclave
+reaches the Nitro Security Module by `ioctl` on `/dev/nsm`, has no persistent
+storage, and has no network interface but vsock. Cordon's audit log is a
+hash-chained file `fsync`ed before each request is processed and its API is a
+TLS listener; neither survives that without being redesigned around vsock and an
+external log sink. A node configured with `measurement_source = "nitro_enclave"`
+refuses to start rather than coming up announcing hardware attestation it would
+fail to produce on the first request — which is the exact failure mode the rest
+of this release is about. Not yet run against a real Nitro Security Module.
+
+The chain walk SEV-SNP and Nitro both need now lives in one place, so the two
+sources cannot drift apart on what "chains to a pinned root" means.
+
 ### Attestation reports are now verifiable at all
 
 Three defects meant a client could not verify a report, which is the only thing
@@ -173,7 +206,7 @@ reads are recorded like anyone's.
 
 `cordon-audit`, the crate implementing the tamper-evident chain, had no tests of
 its own. It has seventeen, and one of them found the rotation bug above. The
-workspace suite is 293 tests, up from 170.
+workspace suite is 376 tests, up from 170.
 
 ## [2.0.0] — 2026-08-30
 

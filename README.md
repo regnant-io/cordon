@@ -171,23 +171,34 @@ this, that is a bug — please report it.
 
 ## Where the trust lives
 
-Three measurement sources, and the difference between them is the whole
-subject. Choose with `attestation.measurement_source`.
+The difference between the measurement sources is the whole subject. Choose
+with `attestation.measurement_source`.
 
-| | `software_measurement` | `tpm2` | `sev_snp` |
-|---|---|---|---|
-| Attests the configuration Cordon runs | yes | yes | yes |
-| Attests how the machine booted | no | yes | yes |
-| Signed by hardware you can check | no | yes | yes |
-| Chains to a vendor root you pinned | no | not yet | yes |
-| **Host root cannot read prompts** | **no** | **no** | **yes** |
-| Permitted outside Light mode | no | yes | yes |
+| | `software_measurement` | `tpm2` | `sev_snp` | `nitro_enclave` |
+|---|---|---|---|---|
+| Attests the configuration Cordon runs | yes | yes | yes | yes |
+| Attests how the machine booted | no | yes | yes | yes |
+| Signed by hardware you can check | no | yes | yes | yes |
+| Chains to a vendor root you pinned | no | not yet | yes | yes |
+| **Host root cannot read prompts** | **no** | **no** | **yes** | **yes** |
+| Permitted outside Light mode | no | yes | yes | yes |
+| **Cordon can run on it today** | **yes** | **yes** | **yes** | **no** |
 
-The last row is the one that matters. A TPM tells you a machine booted software
-you expect; it does not stop whoever owns that machine from reading the memory
-of what is running on it. Under SEV-SNP, Cordon, the model runtime, the weights
-and the prompts are all inside an encrypted guest and the hypervisor is outside
-it — so "the operator cannot read your prompts" stops being an aspiration.
+The fifth row is the one that matters, and the last is the one that constrains
+it. A TPM tells you a machine booted software you expect; it does not stop
+whoever owns that machine from reading the memory of what is running on it.
+Under SEV-SNP, Cordon, the model runtime, the weights and the prompts are all
+inside an encrypted guest and the hypervisor is outside it — so "the operator
+cannot read your prompts" stops being an aspiration.
+
+**`nitro_enclave` is a verifier, not a deployment target.** Cordon parses and
+checks AWS Nitro attestation documents — the COSE signature, the chain to a root
+you pinned, the PCRs, the challenge binding, the freshness — so a client can
+verify one, and a node relaying one can be held to it. Cordon cannot *run*
+inside a Nitro Enclave: an enclave has no persistent storage for the audit log
+and no network interface for the API, both of which Cordon's design rests on. A
+node configured for it refuses to start and says so. See
+[SECURITY.md](SECURITY.md) for the detail.
 
 Whichever source you use, the platform's signature commits to a digest over
 **both** the client's nonce and the node's response-signing key:
@@ -231,6 +242,33 @@ Cordon reads the report through the kernel's `configfs-tsm` interface (Linux
 6.7+), so it needs no ioctl and keeps `#![forbid(unsafe_code)]`. A node
 configured this way refuses to start if it is not in a confidential VM, if the
 guest was launched debuggable, or if no AMD root is pinned.
+
+### Verifying a Nitro Enclaves document
+
+The pins a verifier needs, for the case where a Nitro attestation document
+reaches Cordon from elsewhere:
+
+```toml
+[attestation.expected.nitro]
+# AWS's Nitro Enclaves root CA, base64 DER. Download it once, check its
+# fingerprint against AWS's published value, and commit it — the document
+# carries its own copy of the root, which is exactly why you cannot use that one.
+root_der_b64 = "…"
+# How stale a document may be. The challenge nonce is the primary defence
+# against replay; this bounds a document presented outside an exchange.
+max_age_seconds = 300
+
+[attestation.expected.nitro.pcr_values]
+# PCR0 is the enclave image. Pinning the root establishes "some genuine Nitro
+# enclave"; PCR0 is what makes it "the enclave you built", so it is required.
+0 = "…96 hex characters…"
+# PCR1 is the kernel and bootstrap, PCR2 the application. Optional.
+1 = "…"
+2 = "…"
+```
+
+PCR3 (IAM role) and PCR4 (parent instance ID) tie a deployment to one role or
+one machine. That is occasionally what you want and usually not.
 
 ---
 
@@ -782,7 +820,7 @@ parallel_slots = 8              # raised to max_concurrent_requests if lower
 startup_timeout_seconds = 180
 
 [attestation]
-# sev_snp | tpm2 | software_measurement (Light only)
+# sev_snp | tpm2 | software_measurement (Light only) | nitro_enclave (verify only)
 measurement_source = "tpm2"
 halt_until_verified = true
 interval_hours = 24
@@ -802,6 +840,15 @@ min_bootloader_svn      = 4
 min_snp_svn             = 20
 min_microcode_svn       = 210
 refuse_debuggable_guest = true
+
+[attestation.expected.nitro]    # for verifying AWS Nitro attestation documents
+root_der_b64    = "…"           # AWS's Nitro root, pinned by you
+max_age_seconds = 300
+
+[attestation.expected.nitro.pcr_values]
+0 = "…"                         # the enclave image; required
+1 = "…"                         # kernel and bootstrap
+2 = "…"                         # application
 
 [content_policy]
 # A JSON policy applied to every client that does not name its own. A client
@@ -918,6 +965,13 @@ correct. Use `POST /v1/inference`, which is normalised.
 "sev_snp"` needs an SEV-SNP guest and a kernel exposing `configfs-tsm` (Linux
 6.7+). Cordon will not substitute a weaker measurement for one it was told to
 produce.
+
+**`nitro_enclave cannot be used to run a node`** — correct, and the message
+says why: Cordon verifies Nitro attestation documents but cannot obtain one,
+because an enclave has no persistent storage for the audit log and no network
+interface for the API. Use `sev_snp` for a confidential VM, or `tpm2` for a
+TPM-attested host. The `[attestation.expected.nitro]` pins remain useful for
+verifying a document that reaches Cordon from elsewhere.
 
 **`--bind <addr> is not a loopback address`** — `cordon run` serves plain HTTP
 with header-derived identity, so a routable bind publishes an unauthenticated

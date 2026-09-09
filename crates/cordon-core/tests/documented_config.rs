@@ -90,7 +90,7 @@ fn every_documented_toml_block_parses() {
 fn the_documented_enum_values_and_the_real_ones_agree() {
     let readme = include_str!("../../../README.md");
 
-    for name in ["sev_snp", "tpm2", "software_measurement"] {
+    for name in ["sev_snp", "tpm2", "software_measurement", "nitro_enclave"] {
         let parsed: MeasurementSource = serde_json::from_str(&format!("\"{}\"", name))
             .unwrap_or_else(|e| panic!("the README names measurement source {}: {}", name, e));
         assert!(
@@ -192,6 +192,7 @@ fn the_hardened_templates_validate_once_measurements_are_pinned() {
             mrsigner: Some("cd".repeat(32)),
             min_isv_svn: 0,
             sev_snp: None,
+            nitro: None,
         });
 
         config.validate().unwrap_or_else(|e| {

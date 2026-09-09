@@ -115,3 +115,16 @@ operator does not read a capability into silence:
   through the admin API.
 - The SEV-SNP path has not been exercised against real silicon. It is
   implemented against AMD's specification and tested with synthetic keys.
+- **Running Cordon inside an AWS Nitro Enclave.** The verifier is implemented:
+  Cordon parses the COSE_Sign1 envelope and the CBOR attestation document, checks
+  the ES384 signature, walks the certificate chain to a root you pinned, compares
+  the PCRs, and enforces the challenge binding and a freshness bound. Every
+  refusal path is tested. What is missing is not a binding but a fit: an enclave
+  reaches the Nitro Security Module by `ioctl` on `/dev/nsm`, has no persistent
+  storage, and has no network interface other than vsock. Cordon's audit log is a
+  hash-chained file that must be `fsync`ed before a request is processed, and its
+  API is a TLS listener; neither survives that environment without being
+  redesigned around vsock and an external log sink. A node configured with
+  `measurement_source = "nitro_enclave"` refuses to start rather than coming up
+  and failing on the first attestation request. The Nitro document path has not
+  been exercised against a real Nitro Security Module.

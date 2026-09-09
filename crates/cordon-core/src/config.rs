@@ -447,6 +447,15 @@ pub enum MeasurementSource {
     /// that lets a deployment claim confidentiality against the operator rather
     /// than merely against the network.
     SevSnp,
+    /// An AWS Nitro Enclaves attestation document, signed by the Nitro Security
+    /// Module.
+    ///
+    /// The same confidentiality property SEV-SNP provides, reached differently:
+    /// the enclave's memory is carved out of the parent EC2 instance and is not
+    /// readable from it. See `SECURITY.md` for the constraints an enclave puts
+    /// on the rest of Cordon — no persistent storage and no network but vsock —
+    /// which are why this source is not yet usable for the node's own runtime.
+    NitroEnclave,
     /// A digest of the running configuration and build. This is a **software
     /// integrity measurement**, not a hardware root of trust: it attests that
     /// the node's configuration is what the operator expects, and nothing about
@@ -457,7 +466,10 @@ pub enum MeasurementSource {
 impl MeasurementSource {
     /// Whether this source rests on hardware the operator cannot forge.
     pub fn is_hardware(&self) -> bool {
-        matches!(self, MeasurementSource::Tpm2 | MeasurementSource::SevSnp)
+        matches!(
+            self,
+            MeasurementSource::Tpm2 | MeasurementSource::SevSnp | MeasurementSource::NitroEnclave
+        )
     }
 
     /// Whether this source also makes the node's memory private from the host.
@@ -467,7 +479,10 @@ impl MeasurementSource {
     /// `ARCHITECTURE.md` lists that adversary as undefended in every mode that
     /// is not running in one.
     pub fn provides_memory_confidentiality(&self) -> bool {
-        matches!(self, MeasurementSource::SevSnp)
+        matches!(
+            self,
+            MeasurementSource::SevSnp | MeasurementSource::NitroEnclave
+        )
     }
 }
 
@@ -476,6 +491,7 @@ impl std::fmt::Display for MeasurementSource {
         match self {
             MeasurementSource::Tpm2 => write!(f, "tpm2"),
             MeasurementSource::SevSnp => write!(f, "sev_snp"),
+            MeasurementSource::NitroEnclave => write!(f, "nitro_enclave"),
             MeasurementSource::SoftwareMeasurement => write!(f, "software_measurement"),
         }
     }
@@ -537,6 +553,54 @@ pub struct ExpectedMeasurementsConfig {
     /// report proves only that it is internally consistent.
     #[serde(default)]
     pub sev_snp: Option<SevSnpPinsConfig>,
+    /// Pins for an AWS Nitro Enclaves platform.
+    ///
+    /// Required when `measurement_source = "nitro_enclave"`, for the same
+    /// reason [`Self::sev_snp`] is: a document that supplies its own root
+    /// certificate proves only that whoever wrote it owns a key.
+    #[serde(default)]
+    pub nitro: Option<NitroPinsConfig>,
+}
+
+/// Operator pins for an AWS Nitro Enclaves platform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NitroPinsConfig {
+    /// The AWS Nitro Enclaves root CA certificate, base64 DER.
+    ///
+    /// AWS publishes this; download it once, check its fingerprint against
+    /// AWS's published value, and commit it. Taking it from the attestation
+    /// document instead would mean trusting the document to vouch for itself.
+    pub root_der_b64: String,
+    /// Expected PCR values, lowercase hex, by index.
+    ///
+    /// PCR0 measures the enclave image file, PCR1 the kernel and bootstrap,
+    /// PCR2 the application. Pin at least PCR0 — it is what says the enclave is
+    /// running the image you built. PCR3 (IAM role) and PCR4 (parent instance
+    /// ID) tie a deployment to one role or one machine, which is occasionally
+    /// what an operator wants and usually not.
+    #[serde(default)]
+    pub pcr_values: std::collections::BTreeMap<u8, String>,
+    /// How stale a document may be, in seconds.
+    ///
+    /// The challenge nonce is the primary defence against replay; this is a
+    /// second bound for a document presented outside a challenge exchange. Zero
+    /// disables it.
+    #[serde(default = "default_nitro_max_age")]
+    pub max_age_seconds: u64,
+}
+
+fn default_nitro_max_age() -> u64 {
+    300
+}
+
+impl Default for NitroPinsConfig {
+    fn default() -> Self {
+        Self {
+            root_der_b64: String::new(),
+            pcr_values: std::collections::BTreeMap::new(),
+            max_age_seconds: default_nitro_max_age(),
+        }
+    }
 }
 
 /// Operator pins for an AMD SEV-SNP platform.
@@ -863,6 +927,33 @@ impl CordonConfig {
                     )));
                 }
             }
+
+            // The same requirement for Nitro, for the same reason: a document
+            // carries its own certificate bundle, so the only thing that makes
+            // the bundle mean anything is a root that did not come with it.
+            if self.attestation.measurement_source == MeasurementSource::NitroEnclave {
+                let pins = self
+                    .attestation
+                    .expected
+                    .as_ref()
+                    .and_then(|e| e.nitro.as_ref());
+                let root = pins.map(|n| n.root_der_b64.trim()).unwrap_or("");
+                if root.is_empty() {
+                    return Err(CordonError::ConfigError(format!(
+                        "attestation.measurement_source = \"nitro_enclave\" in {} mode                          requires a pinned AWS Nitro root certificate under                          [attestation.expected.nitro]. Without one the document's                          certificate chains only to the bundle the document itself                          supplied, which proves nothing.",
+                        self.mode
+                    )));
+                }
+                // PCR0 identifies the enclave image. A chain to the AWS root
+                // without it says "some genuine Nitro enclave", which is not
+                // the same as "the enclave you built".
+                if pins.map_or(true, |n| !n.pcr_values.contains_key(&0)) {
+                    return Err(CordonError::ConfigError(format!(
+                        "attestation.measurement_source = \"nitro_enclave\" in {} mode                          requires a pinned PCR0 under                          [attestation.expected.nitro.pcr_values]. Without it the                          attestation establishes that some genuine Nitro enclave                          answered, not that yours did.",
+                        self.mode
+                    )));
+                }
+            }
         }
 
         // ── Egress ──────────────────────────────────────────────────────────
@@ -1094,6 +1185,147 @@ mod tests {
     #[test]
     fn light_default_is_valid() {
         assert!(light().validate().is_ok());
+    }
+
+    /// A confidential-VM source is only worth configuring if the report it
+    /// produces can be chained to something. These tests cover the two
+    /// requirements that make that true, for both sources.
+    #[test]
+    fn sev_snp_without_a_pinned_amd_root_is_refused() {
+        let mut c = hardened(DeploymentMode::Vault);
+        c.attestation.measurement_source = MeasurementSource::SevSnp;
+
+        let refusal = c.validate().unwrap_err().to_string();
+        assert!(
+            refusal.contains("[attestation.expected.sev_snp]"),
+            "the refusal must name the section to fill in: {}",
+            refusal
+        );
+        assert!(
+            refusal.contains("chains to nothing"),
+            "and must say why it matters: {}",
+            refusal
+        );
+    }
+
+    #[test]
+    fn sev_snp_with_a_pinned_amd_root_is_accepted() {
+        let mut c = hardened(DeploymentMode::Vault);
+        c.attestation.measurement_source = MeasurementSource::SevSnp;
+        if let Some(expected) = c.attestation.expected.as_mut() {
+            expected.sev_snp = Some(SevSnpPinsConfig {
+                amd_root_der_b64: "Zm9ybS1vZi1hLXJvb3QtY2VydGlmaWNhdGU=".into(),
+                ..SevSnpPinsConfig::default()
+            });
+        }
+        c.validate().unwrap();
+    }
+
+    /// A confidential VM does not need a TPM as well. Requiring one would rule
+    /// out every cloud confidential VM that does not expose a vTPM.
+    #[test]
+    fn a_confidential_vm_does_not_also_require_a_tpm() {
+        let mut c = hardened(DeploymentMode::Vault);
+        c.attestation.measurement_source = MeasurementSource::SevSnp;
+        c.boot.tpm_required = false;
+        if let Some(expected) = c.attestation.expected.as_mut() {
+            expected.sev_snp = Some(SevSnpPinsConfig {
+                amd_root_der_b64: "Zm9ybS1vZi1hLXJvb3QtY2VydGlmaWNhdGU=".into(),
+                ..SevSnpPinsConfig::default()
+            });
+        }
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn nitro_without_a_pinned_aws_root_is_refused() {
+        let mut c = hardened(DeploymentMode::SovereignCloud);
+        c.attestation.measurement_source = MeasurementSource::NitroEnclave;
+
+        let refusal = c.validate().unwrap_err().to_string();
+        assert!(
+            refusal.contains("[attestation.expected.nitro]"),
+            "{}",
+            refusal
+        );
+    }
+
+    /// A chain to the AWS root proves "some genuine Nitro enclave". PCR0 is
+    /// what makes it "the enclave you built", so a configuration without it is
+    /// refused rather than quietly delivering the weaker claim.
+    #[test]
+    fn nitro_with_a_root_but_no_pinned_pcr0_is_refused() {
+        let mut c = hardened(DeploymentMode::SovereignCloud);
+        c.attestation.measurement_source = MeasurementSource::NitroEnclave;
+        if let Some(expected) = c.attestation.expected.as_mut() {
+            expected.nitro = Some(NitroPinsConfig {
+                root_der_b64: "Zm9ybS1vZi1hLXJvb3QtY2VydGlmaWNhdGU=".into(),
+                ..NitroPinsConfig::default()
+            });
+        }
+
+        let refusal = c.validate().unwrap_err().to_string();
+        assert!(refusal.contains("PCR0"), "{}", refusal);
+        assert!(
+            refusal.contains("not that yours did"),
+            "the refusal must explain the difference it makes: {}",
+            refusal
+        );
+    }
+
+    #[test]
+    fn nitro_with_a_root_and_pcr0_is_accepted_by_validation() {
+        let mut c = hardened(DeploymentMode::SovereignCloud);
+        c.attestation.measurement_source = MeasurementSource::NitroEnclave;
+        if let Some(expected) = c.attestation.expected.as_mut() {
+            let mut pcr_values = std::collections::BTreeMap::new();
+            pcr_values.insert(0u8, "ab".repeat(48));
+            expected.nitro = Some(NitroPinsConfig {
+                root_der_b64: "Zm9ybS1vZi1hLXJvb3QtY2VydGlmaWNhdGU=".into(),
+                pcr_values,
+                ..NitroPinsConfig::default()
+            });
+        }
+        // Validation accepts it; starting a node with it does not, because
+        // Cordon cannot obtain a Nitro document. That refusal lives in
+        // `AttestationService::take_measurements`, which is where the node
+        // learns it cannot do what the configuration asks.
+        c.validate().unwrap();
+    }
+
+    /// Both confidential-VM sources make memory private from the host; a TPM
+    /// and a configuration digest do not. Getting this backwards would let a
+    /// deployment claim confidentiality it does not have.
+    #[test]
+    fn only_a_confidential_vm_claims_memory_confidentiality() {
+        assert!(MeasurementSource::SevSnp.provides_memory_confidentiality());
+        assert!(MeasurementSource::NitroEnclave.provides_memory_confidentiality());
+        assert!(!MeasurementSource::Tpm2.provides_memory_confidentiality());
+        assert!(!MeasurementSource::SoftwareMeasurement.provides_memory_confidentiality());
+
+        assert!(MeasurementSource::SevSnp.is_hardware());
+        assert!(MeasurementSource::NitroEnclave.is_hardware());
+        assert!(MeasurementSource::Tpm2.is_hardware());
+        assert!(!MeasurementSource::SoftwareMeasurement.is_hardware());
+    }
+
+    /// Every source's name round-trips between its `Display` form and the
+    /// string an operator writes in the configuration file. A mismatch would
+    /// mean a value the node prints is one it will not read back.
+    #[test]
+    fn every_measurement_source_name_round_trips() {
+        for source in [
+            MeasurementSource::Tpm2,
+            MeasurementSource::SevSnp,
+            MeasurementSource::NitroEnclave,
+            MeasurementSource::SoftwareMeasurement,
+        ] {
+            let written = source.to_string();
+            let read: MeasurementSource = toml::from_str(&format!("v = \"{}\"", written))
+                .map(|t: toml::Value| t["v"].clone().try_into().unwrap())
+                .unwrap_or_else(|e| panic!("`{}` does not parse back: {}", written, e));
+            assert_eq!(read.to_string(), written);
+        }
     }
 
     #[test]

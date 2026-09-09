@@ -198,6 +198,8 @@ fn client_pins(chain: &Chain) -> ExpectedMeasurements {
             refuse_debuggable_guest: true,
             expected_vmpl: 0,
         }),
+        // Pins for a source this report does not carry.
+        nitro: None,
     }
 }
 

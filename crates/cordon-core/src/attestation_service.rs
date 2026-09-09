@@ -55,8 +55,8 @@ use crate::config::{CordonConfig, MeasurementSource, TeePreference};
 use crate::error::{CordonError, CordonResult};
 use cordon_crypto::attestation::{
     attestation_challenge, compute_combined_hash, AttestationReport, CombinedAttestation,
-    ExpectedMeasurements, PlatformEvidence, SevSnpPins, TeeQuote, TeeType, TpmPcrSet, TpmQuote,
-    VerifiedAttestation,
+    ExpectedMeasurements, NitroPins, PlatformEvidence, SevSnpPins, TeeQuote, TeeType, TpmPcrSet,
+    TpmQuote, VerifiedAttestation,
 };
 
 /// PCR register allocations.
@@ -148,6 +148,30 @@ impl AttestationService {
                 // request.
                 self.probe_confidential_vm()?;
                 BTreeMap::new()
+            }
+            MeasurementSource::NitroEnclave => {
+                // Cordon verifies Nitro attestation documents but cannot yet
+                // obtain one: that needs an ioctl on `/dev/nsm` from inside an
+                // enclave, and an enclave has neither persistent storage for
+                // the audit log nor a network interface for the API. Both are
+                // load-bearing here, so this is an architectural gap rather
+                // than a missing binding.
+                //
+                // Refusing at startup is the point. A node that came up
+                // announcing `nitro_enclave` and then failed on the first
+                // attestation request would be exactly the kind of defence
+                // that reports success without doing the work.
+                return Err(CordonError::ConfigError(
+                    "attestation.measurement_source = \"nitro_enclave\" cannot be used to \
+                     run a node. Cordon verifies Nitro attestation documents — a client \
+                     can check one against a pinned AWS root — but it cannot produce one: \
+                     the Nitro Security Module is reached by ioctl from inside an enclave, \
+                     and an enclave has no persistent storage for the audit log and no \
+                     network interface for the API. See the \"What is not implemented\" \
+                     section of SECURITY.md. Use \"sev_snp\" for a confidential VM, or \
+                     \"tpm2\" for a TPM-attested host."
+                        .into(),
+                ));
             }
             MeasurementSource::SoftwareMeasurement => {
                 tracing::warn!(
@@ -393,7 +417,9 @@ impl AttestationService {
                 },
                 // A confidential VM's evidence is its own attestation report,
                 // carried in `platform_evidence` below. There is no TPM quote.
-                MeasurementSource::SevSnp => {
+                // A confidential VM's evidence is its own attestation
+                // report or document; neither carries a TPM quote.
+                MeasurementSource::SevSnp | MeasurementSource::NitroEnclave => {
                     (String::new(), String::new(), String::new(), Vec::new())
                 }
                 MeasurementSource::SoftwareMeasurement => (
@@ -549,6 +575,11 @@ impl AttestationService {
                 min_microcode_svn: snp.min_microcode_svn,
                 refuse_debuggable_guest: snp.refuse_debuggable_guest,
                 expected_vmpl: snp.expected_vmpl,
+            }),
+            nitro: pinned.nitro.as_ref().map(|n| NitroPins {
+                root_der_b64: n.root_der_b64.clone(),
+                pcr_values: n.pcr_values.clone(),
+                max_age_seconds: n.max_age_seconds,
             }),
         })
     }
@@ -770,6 +801,60 @@ mod tests {
         assert!(service.pinned_measurements().is_none());
     }
 
+    /// Cordon verifies Nitro attestation documents but cannot produce one, so
+    /// a node configured for that source must refuse to start rather than come
+    /// up announcing hardware attestation it will fail to deliver on the first
+    /// request. This is the failure mode the whole branch was about.
+    #[test]
+    fn a_node_configured_for_nitro_refuses_to_start() {
+        let mut config = CordonConfig::default_light("node-1".into(), "deployment-1".into());
+        config.attestation.measurement_source = MeasurementSource::NitroEnclave;
+
+        let refusal = match AttestationService::new(config) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a node configured for Nitro Enclaves started anyway"),
+        };
+        assert!(
+            refusal.contains("cannot produce one"),
+            "the refusal must say what is missing: {}",
+            refusal
+        );
+        assert!(
+            refusal.contains("SECURITY.md"),
+            "and where the operator can read why: {}",
+            refusal
+        );
+        assert!(
+            refusal.contains("sev_snp") && refusal.contains("tpm2"),
+            "and what to use instead: {}",
+            refusal
+        );
+    }
+
+    /// Nitro pins configured by an operator must reach the verifier. Dropping
+    /// them silently would make every Nitro document fail with "no root is
+    /// pinned" on a node where one plainly was.
+    #[test]
+    fn nitro_pins_reach_the_verifier() {
+        let mut pcr_values = std::collections::BTreeMap::new();
+        pcr_values.insert(0u8, "ab".repeat(48));
+        let service = service_with(Some(ExpectedMeasurementsConfig {
+            mrenclave: Some("c".repeat(64)),
+            nitro: Some(crate::config::NitroPinsConfig {
+                root_der_b64: "Zm9ybS1vZi1hLXJvb3QtY2VydGlmaWNhdGU=".into(),
+                pcr_values: pcr_values.clone(),
+                max_age_seconds: 120,
+            }),
+            ..ExpectedMeasurementsConfig::default()
+        }));
+
+        let pins = service.pinned_measurements().expect("pins were configured");
+        let nitro = pins.nitro.expect("the Nitro pins must survive the trip");
+        assert_eq!(nitro.root_der_b64, "Zm9ybS1vZi1hLXJvb3QtY2VydGlmaWNhdGU=");
+        assert_eq!(nitro.pcr_values, pcr_values);
+        assert_eq!(nitro.max_age_seconds, 120);
+    }
+
     #[test]
     fn verification_succeeds_against_matching_pins() {
         let mut config = CordonConfig::default_light("node-1".into(), "deployment-1".into());
@@ -782,6 +867,7 @@ mod tests {
             mrsigner: Some(probe.mrsigner()),
             min_isv_svn: 0,
             sev_snp: None,
+            nitro: None,
         });
         let service = AttestationService::new(config).unwrap();
 
@@ -820,6 +906,7 @@ mod tests {
             mrsigner: Some(probe.mrsigner()),
             min_isv_svn: 0,
             sev_snp: None,
+            nitro: None,
         });
         let service = AttestationService::new(config).unwrap();
 

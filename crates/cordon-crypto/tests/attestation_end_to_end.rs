@@ -178,6 +178,7 @@ fn client_pins() -> ExpectedMeasurements {
         min_isv_svn: 1,
         tee_type: TeeType::AmdSevSnp,
         sev_snp: None,
+        nitro: None,
     }
 }
 

@@ -295,6 +295,17 @@ pub enum PlatformEvidence {
         /// here — a chain that shipped its own root would prove nothing.
         certificate_chain_b64: Vec<String>,
     },
+    /// AWS Nitro Enclaves.
+    ///
+    /// One field, because a Nitro attestation document is self-contained: the
+    /// COSE_Sign1 envelope carries the leaf certificate and the certificate
+    /// bundle inside the signed payload. The bundle includes AWS's own copy of
+    /// the root, which the verifier ignores in favour of the one the operator
+    /// pinned — see [`crate::nitro::NitroExpectations::root_der`].
+    Nitro {
+        /// The attestation document, base64 COSE_Sign1.
+        document_b64: String,
+    },
 }
 
 impl PlatformEvidence {
@@ -303,6 +314,7 @@ impl PlatformEvidence {
         match self {
             PlatformEvidence::None => "none",
             PlatformEvidence::SevSnp { .. } => "amd_sev_snp",
+            PlatformEvidence::Nitro { .. } => "aws_nitro_enclaves",
         }
     }
 
@@ -323,6 +335,9 @@ impl PlatformEvidence {
                 for cert in certificate_chain_b64 {
                     writer.write_str(cert);
                 }
+            }
+            PlatformEvidence::Nitro { document_b64 } => {
+                writer.write_str(document_b64);
             }
         }
         writer
@@ -374,6 +389,44 @@ impl SevSnpPins {
     }
 }
 
+/// Measurements an operator pins for an AWS Nitro Enclaves deployment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NitroPins {
+    /// The AWS Nitro Enclaves root CA, base64 DER.
+    ///
+    /// Pinned by the verifier rather than read from the document's own
+    /// `cabundle`, for the same reason the AMD root is: a document that
+    /// supplies its own root proves only that its author owns a key.
+    pub root_der_b64: String,
+    /// Expected PCR values, lowercase hex, by index.
+    ///
+    /// PCR0 measures the enclave image, PCR1 the kernel and bootstrap, PCR2 the
+    /// application. Pin at least PCR0. PCR4 is the parent instance ID and PCR3
+    /// the IAM role, which tie a deployment to one machine or one role — pin
+    /// those only if that is what you mean.
+    #[serde(default)]
+    pub pcr_values: std::collections::BTreeMap<u8, String>,
+    /// How stale a document may be, in seconds. Zero disables the check; the
+    /// nonce remains the primary defence against replay.
+    #[serde(default = "default_nitro_max_age")]
+    pub max_age_seconds: u64,
+}
+
+fn default_nitro_max_age() -> u64 {
+    300
+}
+
+impl NitroPins {
+    /// Pins with the safe defaults, given a root certificate.
+    pub fn secure_defaults(root_der_b64: String) -> Self {
+        Self {
+            root_der_b64,
+            pcr_values: std::collections::BTreeMap::new(),
+            max_age_seconds: default_nitro_max_age(),
+        }
+    }
+}
+
 /// Combined attestation report — measurements plus whatever hardware evidence
 /// the platform can produce.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,12 +472,29 @@ pub struct ExpectedMeasurements {
     /// rather than accepted on its measurements alone.
     #[serde(default)]
     pub sev_snp: Option<SevSnpPins>,
+    /// Pins for an AWS Nitro Enclaves platform. `None` means a Nitro document
+    /// cannot be verified — there is no root to chain to — and such a document
+    /// is refused rather than accepted on its measurements alone.
+    #[serde(default)]
+    pub nitro: Option<NitroPins>,
 }
 
 impl ExpectedMeasurements {
     /// Whether this expectation set pins any measurement at all.
+    ///
+    /// Nitro deployments pin PCRs under [`NitroPins::pcr_values`] rather than
+    /// in [`Self::pcr_values`], which holds TPM PCRs. Leaving the Nitro pins
+    /// out of this check would make a fully-pinned Nitro configuration look
+    /// empty and be refused.
     pub fn is_empty(&self) -> bool {
-        self.pcr_values.is_empty() && self.mrenclave.is_empty() && self.mrsigner.is_empty()
+        let nitro_pins_nothing = self
+            .nitro
+            .as_ref()
+            .map_or(true, |pins| pins.pcr_values.is_empty());
+        self.pcr_values.is_empty()
+            && self.mrenclave.is_empty()
+            && self.mrsigner.is_empty()
+            && nitro_pins_nothing
     }
 }
 
@@ -608,14 +678,18 @@ impl AttestationReport {
     ) -> CryptoResult<(PlatformQuoteStatus, bool)> {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
-        let PlatformEvidence::SevSnp {
-            report_b64,
-            vcek_der_b64,
-            certificate_chain_b64,
-        } = &self.combined.platform_evidence
-        else {
-            return Ok((PlatformQuoteStatus::Absent, false));
-        };
+        let (report_b64, vcek_der_b64, certificate_chain_b64) =
+            match &self.combined.platform_evidence {
+                PlatformEvidence::SevSnp {
+                    report_b64,
+                    vcek_der_b64,
+                    certificate_chain_b64,
+                } => (report_b64, vcek_der_b64, certificate_chain_b64),
+                PlatformEvidence::Nitro { document_b64 } => {
+                    return self.verify_nitro_evidence(expected, client_nonce, document_b64);
+                }
+                PlatformEvidence::None => return Ok((PlatformQuoteStatus::Absent, false)),
+            };
 
         let pins = expected.sev_snp.as_ref().ok_or_else(|| {
             CryptoError::AttestationFailed(
@@ -683,6 +757,71 @@ impl AttestationReport {
                 // exactly what "this key belongs to genuine hardware" means
                 // here — unlike the TPM path, where the equivalent check is not
                 // yet implemented.
+                ak_is_trusted: true,
+            },
+            !self.combined.tee_quote.enclave_signing_key_hex.is_empty(),
+        ))
+    }
+
+    /// Check an AWS Nitro Enclaves attestation document.
+    ///
+    /// The document is self-contained — it carries its own leaf certificate and
+    /// bundle — so the only thing that has to come from outside it is the root,
+    /// which comes from the operator's pins.
+    fn verify_nitro_evidence(
+        &self,
+        expected: &ExpectedMeasurements,
+        client_nonce: &str,
+        document_b64: &str,
+    ) -> CryptoResult<(PlatformQuoteStatus, bool)> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let pins = expected.nitro.as_ref().ok_or_else(|| {
+            CryptoError::AttestationFailed(
+                "this report carries Nitro Enclaves evidence, but no AWS Nitro root                  certificate is pinned to check it against. A chain is only worth                  walking if its root is one you already trust — pin it under                  [attestation.expected.nitro]."
+                    .into(),
+            )
+        })?;
+
+        let document = B64.decode(document_b64).map_err(|e| {
+            CryptoError::AttestationFailed(format!("malformed Nitro attestation document: {}", e))
+        })?;
+        let root_der = B64.decode(&pins.root_der_b64).map_err(|e| {
+            CryptoError::AttestationFailed(format!(
+                "malformed pinned AWS Nitro root certificate: {}",
+                e
+            ))
+        })?;
+
+        let expectations = crate::nitro::NitroExpectations {
+            root_der,
+            pcrs: pins.pcr_values.clone(),
+            max_age_seconds: pins.max_age_seconds,
+        };
+
+        // Nitro's nonce field is variable-length, so the challenge goes in at
+        // its natural width rather than padded to a fixed report field the way
+        // SEV-SNP's REPORT_DATA requires.
+        let challenge = attestation_challenge(
+            &self.combined.tee_quote.enclave_signing_key_hex,
+            client_nonce,
+        );
+
+        let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+        let (_document, verification) =
+            crate::nitro::verify_document(&document, &challenge, &expectations, now_ms)?;
+
+        if let Some(failure) = verification.first_failure() {
+            return Err(CryptoError::AttestationFailed(format!(
+                "Nitro Enclaves attestation failed: {}",
+                failure
+            )));
+        }
+
+        Ok((
+            PlatformQuoteStatus::Verified {
+                // The leaf chained to a root the verifier pinned, which is what
+                // "this key belongs to genuine hardware" means here.
                 ak_is_trusted: true,
             },
             !self.combined.tee_quote.enclave_signing_key_hex.is_empty(),
@@ -890,6 +1029,7 @@ mod tests {
             min_isv_svn: 0,
             tee_type: TeeType::Simulation,
             sev_snp: None,
+            nitro: None,
         }
     }
 

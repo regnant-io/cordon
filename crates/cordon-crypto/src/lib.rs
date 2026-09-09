@@ -12,13 +12,16 @@
 
 pub mod attestation;
 pub mod canonical;
+pub mod cbor;
 pub mod error;
 pub mod hierarchy;
 pub mod kdf;
+pub mod nitro;
 pub mod sev_snp;
 pub mod signing;
 pub mod symmetric;
 pub mod tpm2;
+pub mod x509_chain;
 pub mod zeroize_ext;
 
 pub use attestation::{
