@@ -396,16 +396,49 @@ impl OutputFilter {
     }
 }
 
+/// Smallest number of new characters that triggers a re-scan.
+///
+/// Roughly four tokens, so a stream still arrives in visibly continuous pieces.
+const MIN_REFILTER_STRIDE_CHARS: usize = 16;
+
+/// The stride grows as one 64th of the text already accumulated, so a long
+/// response re-scans progressively less often. See [`StreamingFilter`].
+const REFILTER_STRIDE_DIVISOR: usize = 64;
+
 /// Applies a policy to a response as it is generated.
 ///
 /// The contract is that nothing is released that the equivalent whole-response
-/// filter would have removed. That is achieved by re-filtering the accumulated
-/// text on every push and releasing only the part far enough from the end that
-/// no further input can change it.
+/// filter would have removed. That holds because release is only ever decided
+/// from a filter result computed over the *whole* accumulated text, and only
+/// text far enough from the end that no further input can change it is let go.
+///
+/// # Why the re-scan is strided
+///
+/// A rule can match across a chunk boundary, so the policy has to be evaluated
+/// against the accumulated text rather than against each delta in isolation.
+/// Doing that on every delta makes the work quadratic in the length of the
+/// response: llama.cpp emits roughly one token per chunk, so a 4,000-token
+/// answer meant 4,000 full regex passes over a buffer growing to 16 KB. At the
+/// 32,768-token ceiling `inference.max_output_tokens` allows, that is seconds
+/// of CPU spent re-reading the same text, per stream.
+///
+/// So the re-scan is strided: it runs once every [`MIN_REFILTER_STRIDE_CHARS`]
+/// characters at first, and progressively less often as the response grows.
+/// This costs nothing in safety. Release is computed only from a completed
+/// scan, so between scans nothing is released — the effect is that text is
+/// released in slightly larger pieces, never that unscanned text escapes. A
+/// blocking rule is likewise noticed at the next scan, by which point nothing
+/// it would have blocked has left the node. [`Self::finish`] always performs a
+/// final full scan, so the last stride is never skipped.
 pub struct StreamingFilter {
     filter: std::sync::Arc<OutputFilter>,
     /// Everything the model has produced so far, unfiltered.
     raw: String,
+    /// Characters of `raw` present at the last completed scan.
+    scanned_chars: usize,
+    /// Characters accumulated in `raw`, tracked incrementally so the common
+    /// path does not walk the whole buffer to count them.
+    raw_chars: usize,
     /// How many characters of the *filtered* text have been released.
     released_chars: usize,
     /// Trailing characters withheld pending more context.
@@ -427,11 +460,24 @@ impl StreamingFilter {
         Self {
             filter,
             raw: String::new(),
+            scanned_chars: 0,
+            raw_chars: 0,
             released_chars: 0,
             holdback,
             released: String::new(),
             matches: Vec::new(),
         }
+    }
+
+    /// Whether enough new text has arrived to be worth another full scan.
+    fn scan_is_due(&self) -> bool {
+        // Nothing can be released until the buffer is longer than the holdback,
+        // so there is no reason to scan before then.
+        if self.raw_chars <= self.holdback {
+            return false;
+        }
+        let stride = MIN_REFILTER_STRIDE_CHARS.max(self.scanned_chars / REFILTER_STRIDE_DIVISOR);
+        self.raw_chars - self.scanned_chars >= stride
     }
 
     /// Add generated text and return whatever is now safe to release.
@@ -441,7 +487,14 @@ impl StreamingFilter {
     /// anything already released was, by construction, text the policy allowed.
     pub fn push(&mut self, delta: &str) -> CordonResult<String> {
         self.raw.push_str(delta);
+        self.raw_chars += delta.chars().count();
+
+        if !self.scan_is_due() {
+            return Ok(String::new());
+        }
+
         let result = self.filter.filter(self.raw.clone());
+        self.scanned_chars = self.raw_chars;
 
         if result.blocked {
             let rule_id = result
@@ -472,9 +525,12 @@ impl StreamingFilter {
 
     /// Release the withheld tail and return the complete filtered text.
     ///
+    /// Always performs a full scan, whatever the stride left unscanned, so the
+    /// final result is exactly what the whole-response filter would produce.
     /// Call exactly once, when generation has finished.
     pub fn finish(&mut self) -> CordonResult<(String, FilterResult)> {
         let result = self.filter.filter(std::mem::take(&mut self.raw));
+        self.scanned_chars = self.raw_chars;
 
         if result.blocked {
             let rule_id = result
@@ -735,8 +791,97 @@ mod tests {
         let mut stream = StreamingFilter::with_holdback(f, 4);
 
         stream.push("this is fine ").unwrap();
-        let err = stream.push("forbidden").unwrap_err();
+        // Enough text to cross the re-scan stride, so the block is noticed here
+        // rather than being deferred to `finish`.
+        let err = stream
+            .push("forbidden and then some more text to cross the stride")
+            .unwrap_err();
         assert!(matches!(err, CordonError::ContentPolicyViolation { .. }));
+    }
+
+    /// Whatever the stride skipped, `finish` must still catch a blocking rule —
+    /// a short response might never trigger a mid-stream scan at all.
+    #[test]
+    fn a_blocking_rule_in_unscanned_text_is_caught_at_finish() {
+        let f = Arc::new(
+            OutputFilter::new(&policy(
+                PolicyRuleType::TokenBlocklist {
+                    tokens: vec!["forbidden".into()],
+                },
+                PolicyAction::ReturnError,
+            ))
+            .unwrap(),
+        );
+        let mut stream = StreamingFilter::with_holdback(f, 1024);
+
+        // Well under the holdback, so no scan is due and nothing is released.
+        assert_eq!(stream.push("forbidden").unwrap(), "");
+        assert!(matches!(
+            stream.finish().unwrap_err(),
+            CordonError::ContentPolicyViolation { .. }
+        ));
+    }
+
+    /// The stride must change how often the policy is evaluated, never what it
+    /// concludes: one character at a time and all at once must agree.
+    #[test]
+    fn striding_does_not_change_the_result() {
+        let build = || {
+            Arc::new(
+                OutputFilter::new(&policy(
+                    PolicyRuleType::PiiDetector {
+                        pii_types: vec![PiiType::Email, PiiType::CreditCard],
+                        redact: true,
+                    },
+                    PolicyAction::Redact,
+                ))
+                .unwrap(),
+            )
+        };
+        let source = format!(
+            "Contact alice@example.com about card 4111 1111 1111 1111. {}",
+            "Filler text to push the response past several strides. ".repeat(40)
+        );
+
+        let mut one_char_at_a_time = StreamingFilter::new(build());
+        let mut released = String::new();
+        for ch in source.chars() {
+            released.push_str(&one_char_at_a_time.push(&ch.to_string()).unwrap());
+        }
+        let (tail, _) = one_char_at_a_time.finish().unwrap();
+        released.push_str(&tail);
+
+        let mut all_at_once = StreamingFilter::new(build());
+        let mut bulk = all_at_once.push(&source).unwrap();
+        let (tail, _) = all_at_once.finish().unwrap();
+        bulk.push_str(&tail);
+
+        assert_eq!(released, bulk);
+        assert_eq!(released, build().filter(source).text);
+        assert!(!released.contains("alice@example.com"));
+    }
+
+    /// The regression the stride exists to prevent. Every chunk previously
+    /// triggered a full re-scan of everything received so far, so the work grew
+    /// with the square of the response length.
+    #[test]
+    fn a_long_response_does_not_rescan_itself_once_per_token() {
+        let f = Arc::new(OutputFilter::new(&ContentPolicy::default_permissive("c")).unwrap());
+        let mut stream = StreamingFilter::new(f);
+
+        // 32k tokens is the ceiling `inference.max_output_tokens` allows.
+        let started = std::time::Instant::now();
+        for _ in 0..32_768 {
+            let _ = stream.push("word ").unwrap();
+        }
+        let _ = stream.finish().unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "filtering a full-length response took {:?}",
+            elapsed
+        );
     }
 
     #[test]

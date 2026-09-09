@@ -62,7 +62,9 @@ enum Command {
     Run {
         /// Model ID from `cordon models`, or a path to a GGUF file.
         model: String,
-        /// Address to bind the API to.
+        /// Address to bind the API to. Must be loopback — `run` serves plain
+        /// HTTP with header-derived identity, so any caller that can reach the
+        /// port can claim any client ID.
         #[arg(long, default_value = "127.0.0.1:8477")]
         bind: String,
         /// Directory holding pulled models.
@@ -83,6 +85,13 @@ enum Command {
         /// Console port.
         #[arg(long, default_value_t = 8478)]
         ui_port: u16,
+        /// Permit a non-loopback `--bind`, accepting that the API is then
+        /// reachable off this host without TLS or certificate identity.
+        ///
+        /// For a throwaway demo on a trusted network. Use `cordon serve` with
+        /// mTLS for anything else.
+        #[arg(long)]
+        insecure_bind: bool,
     },
 
     /// List models available locally.
@@ -197,7 +206,9 @@ async fn main() -> Result<()> {
             ctx_size,
             no_ui,
             ui_port,
+            insecure_bind,
         } => {
+            guard_run_bind_address(&bind, insecure_bind)?;
             let config = build_run_config(
                 &model, &model_dir, &data_dir, gpu_layers, ctx_size, !no_ui, ui_port,
             )?;
@@ -255,6 +266,49 @@ async fn main() -> Result<()> {
             serve_with(cfg, &bind, tls).await
         }
     }
+}
+
+/// Refuse a non-loopback `--bind` on `cordon run` unless explicitly overridden.
+///
+/// `run` is the development path: it serves plain HTTP and takes client
+/// identity from the `x-client-id` header, so anyone who can reach the port can
+/// claim any client ID and the whole policy layer becomes decorative. On
+/// loopback that is a reasonable trade. On `0.0.0.0` it silently publishes an
+/// unauthenticated inference endpoint to the network, and a log line the
+/// operator has already scrolled past is not an adequate defence against
+/// something that severe — every comparable mismatch elsewhere in Cordon is
+/// refused at startup rather than warned about.
+fn guard_run_bind_address(bind: &str, insecure_bind: bool) -> Result<()> {
+    let addr: SocketAddr = bind.parse().context("invalid bind address")?;
+    if addr.ip().is_loopback() {
+        return Ok(());
+    }
+
+    if insecure_bind {
+        tracing::warn!(
+            %addr,
+            "Serving on a routable address without TLS or certificate identity. \
+             Any caller that can reach this port can claim any client ID."
+        );
+        return Ok(());
+    }
+
+    bail!(
+        "--bind {} is not a loopback address.\n\n\
+         `cordon run` serves plain HTTP and reads client identity from the \
+         x-client-id header, so every caller that can reach this port can claim \
+         any client ID. Binding it to a routable address publishes an \
+         unauthenticated inference endpoint.\n\n\
+         For a real deployment, use `cordon serve` with TLS and a client CA:\n\n    \
+             cordon serve --config /etc/cordon/cordon.toml --bind {}\n\n\
+         To reach a loopback node from elsewhere, forward the port:\n\n    \
+             ssh -L {}:127.0.0.1:{} operator@host\n\n\
+         If you understand the exposure and want it anyway, pass --insecure-bind.",
+        addr,
+        addr,
+        addr.port(),
+        addr.port()
+    )
 }
 
 /// Build the configuration `cordon run` uses: Light mode, supervised runtime,
@@ -660,4 +714,48 @@ fn print_default_config(mode: &str) -> Result<()> {
         println!("# 11 = \"sha256:...\"   # Cordon runtime");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_binds_are_accepted() {
+        for addr in ["127.0.0.1:8477", "[::1]:8477", "127.5.5.5:1"] {
+            assert!(
+                guard_run_bind_address(addr, false).is_ok(),
+                "loopback address {} was refused",
+                addr
+            );
+        }
+    }
+
+    /// The footgun this closes: `cordon run` has no TLS and no certificate
+    /// identity, so a routable bind publishes inference to anyone who can reach
+    /// the port.
+    #[test]
+    fn routable_binds_are_refused_by_default() {
+        for addr in ["0.0.0.0:8477", "192.168.1.10:8477", "[::]:8477"] {
+            let err = guard_run_bind_address(addr, false)
+                .expect_err(&format!("{} should be refused", addr))
+                .to_string();
+            assert!(err.contains("loopback"), "unexpected error: {}", err);
+            // The refusal must say what to do instead, not merely say no.
+            assert!(err.contains("cordon serve"), "unexpected error: {}", err);
+        }
+    }
+
+    #[test]
+    fn the_override_permits_a_routable_bind() {
+        assert!(guard_run_bind_address("0.0.0.0:8477", true).is_ok());
+    }
+
+    #[test]
+    fn a_malformed_bind_is_a_clear_error() {
+        let err = guard_run_bind_address("not-an-address", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid bind address"), "unexpected: {}", err);
+    }
 }

@@ -498,10 +498,25 @@ pub async fn inference_stream(
         // Whatever happened, the node records the outcome and closes the stream
         // with a terminal event, so a client never has to infer completion from
         // a silent socket.
+        // The rules the streaming filter fired, recorded on both the success and
+        // the failure path so a redacted stream is auditable the same way a
+        // redacted unary response is.
+        let rules_matched: Vec<String> =
+            filter.matches().iter().map(|m| m.rule_id.clone()).collect();
+
         let terminal = match failed {
             Some(error) => {
+                // A stream stopped by policy and a stream stopped by a runtime
+                // fault are different events, and the audit record should say
+                // which. Only the first is a content-filter finish.
+                let stopped_by_policy = matches!(error, CordonError::ContentPolicyViolation { .. });
+                let recorded_reason = if stopped_by_policy {
+                    FinishReason::ContentFilter
+                } else {
+                    FinishReason::Error
+                };
                 let response = crate::error::ApiErrorResponse::from(error);
-                node.finish_streaming_inference(&meta, None, usage, FinishReason::ContentFilter);
+                node.finish_streaming_inference(&meta, None, usage, recorded_reason, rules_matched);
                 Event::default().event("error").data(
                     serde_json::json!({
                         "error": response.body.error,
@@ -512,8 +527,13 @@ pub async fn inference_stream(
             }
             None => {
                 let text = filter.released_text().to_string();
-                let record =
-                    node.finish_streaming_inference(&meta, Some(&text), usage, finish_reason);
+                let record = node.finish_streaming_inference(
+                    &meta,
+                    Some(&text),
+                    usage,
+                    finish_reason,
+                    rules_matched,
+                );
                 let timestamp = Utc::now();
                 let signature = sign_response(
                     &node,

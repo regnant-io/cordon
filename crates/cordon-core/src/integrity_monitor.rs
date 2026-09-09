@@ -1,7 +1,23 @@
-//! Continuous Integrity Monitor — §6.5
+//! Continuous integrity monitor.
 //!
-//! Background process: every 15 minutes, samples 5–10% of ciphertext weight
-//! shards, hashes them, compares against manifest. Any mismatch → halt immediately.
+//! Every `integrity_check_interval_minutes`, every ciphertext shard of every
+//! registered bundle is streamed and hashed against its manifest digest. A
+//! mismatch withdraws the bundle from service and, when `halt_on_tamper` is set,
+//! quarantines the node.
+//!
+//! The interval is also the lifetime of a verdict on the serving path, so a
+//! monitor that stops running takes the node out of service rather than leaving
+//! it serving weights nobody has confirmed lately.
+//!
+//! # Why the check runs on a blocking thread
+//!
+//! [`ModelStore::run_integrity_check`] streams whole shards off disk. On a
+//! multi-gigabyte bundle that is seconds to minutes of uninterrupted
+//! synchronous I/O and hashing. Running it directly inside a `tokio::spawn`
+//! would occupy one of the runtime's worker threads for that whole time, and
+//! every request scheduled onto that worker would stall behind it — turning a
+//! background integrity check into a periodic latency spike. It runs on
+//! `spawn_blocking` instead.
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -50,7 +66,11 @@ impl IntegrityMonitor {
         (monitor, tamper_flag)
     }
 
-    /// Run a single integrity check cycle
+    /// Run a single integrity check cycle.
+    ///
+    /// **Blocking.** Hashes every shard of every bundle. Call it from
+    /// [`Self::run_check_blocking`], or from your own `spawn_blocking`, never
+    /// directly from an async task.
     pub fn run_check(&self) -> CordonResult<bool> {
         let bundle_ids = self.model_store.bundle_ids();
 
@@ -90,24 +110,40 @@ impl IntegrityMonitor {
         Ok(all_passed)
     }
 
-    /// Start the background integrity monitoring loop
+    /// Run one check cycle on a blocking thread, off the async runtime.
+    ///
+    /// This is the entry point every async caller should use.
+    pub async fn run_check_blocking(self: Arc<Self>) -> CordonResult<bool> {
+        tokio::task::spawn_blocking(move || self.run_check())
+            .await
+            .map_err(|e| {
+                crate::error::CordonError::Internal(format!("integrity check task failed: {}", e))
+            })?
+    }
+
+    /// Start the background integrity monitoring loop.
     pub fn start(self: Arc<Self>) {
-        let interval_secs = self.interval_minutes * 60;
+        let interval_secs = self.interval_minutes.max(1) * 60;
         tokio::spawn(async move {
-            // Initial delay — let system initialize before first check
+            // Initial delay — let the node finish coming up before the first check.
             tokio::time::sleep(Duration::from_secs(30)).await;
 
             let mut ticker = interval(Duration::from_secs(interval_secs));
             loop {
                 ticker.tick().await;
 
-                // Don't check if tamper already detected
+                // Once tamper is confirmed the bundle is already out of service
+                // and the node is quarantined; re-hashing it every interval adds
+                // nothing but I/O.
                 if self.tamper_detected.load(Ordering::SeqCst) {
                     tracing::warn!("Integrity monitor: tamper already detected — skipping check");
                     continue;
                 }
 
-                match self.run_check() {
+                // Hashing every shard is long, synchronous work. Handing it to a
+                // blocking thread keeps it off the runtime's workers, where it
+                // would otherwise stall every request scheduled behind it.
+                match self.clone().run_check_blocking().await {
                     Ok(true) => {}
                     Ok(false) => {
                         tracing::error!("Integrity monitor: check FAILED");
