@@ -15,6 +15,7 @@ pub mod canonical;
 pub mod error;
 pub mod hierarchy;
 pub mod kdf;
+pub mod sev_snp;
 pub mod signing;
 pub mod symmetric;
 pub mod tpm2;

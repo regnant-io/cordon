@@ -270,14 +270,124 @@ impl std::fmt::Display for TeeType {
     }
 }
 
-/// Combined attestation report — a TPM PCR snapshot plus a TEE measurement.
+/// Hardware evidence from a confidential-computing platform.
+///
+/// Kept separate from [`TpmQuote`] because the two answer different questions.
+/// A TPM attests how a machine booted; the operator still owns the machine
+/// afterwards. A confidential VM's report attests a running guest whose memory
+/// the operator cannot read — which is the property Cordon's threat model
+/// otherwise has to say it does not have.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlatformEvidence {
+    /// No confidential-VM evidence. Any hardware claim rests on
+    /// [`CombinedAttestation::tpm_quote`].
+    #[default]
+    None,
+    /// AMD SEV-SNP.
+    SevSnp {
+        /// The raw 1184-byte attestation report, base64.
+        report_b64: String,
+        /// The chip's VCEK certificate, base64 DER.
+        vcek_der_b64: String,
+        /// Intermediates between the VCEK and the root, leaf-ward first,
+        /// base64 DER. The root itself is pinned by the verifier, not carried
+        /// here — a chain that shipped its own root would prove nothing.
+        certificate_chain_b64: Vec<String>,
+    },
+}
+
+impl PlatformEvidence {
+    /// A short name for logs and health output.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            PlatformEvidence::None => "none",
+            PlatformEvidence::SevSnp { .. } => "amd_sev_snp",
+        }
+    }
+
+    fn canonical(&self) -> CanonicalWriter {
+        let mut writer = CanonicalWriter::new("platform_evidence");
+        writer.write_str(self.kind());
+        match self {
+            PlatformEvidence::None => {}
+            PlatformEvidence::SevSnp {
+                report_b64,
+                vcek_der_b64,
+                certificate_chain_b64,
+            } => {
+                writer
+                    .write_str(report_b64)
+                    .write_str(vcek_der_b64)
+                    .write_u32(certificate_chain_b64.len() as u32);
+                for cert in certificate_chain_b64 {
+                    writer.write_str(cert);
+                }
+            }
+        }
+        writer
+    }
+}
+
+/// Measurements and policy an operator pins for a SEV-SNP deployment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SevSnpPins {
+    /// The AMD root key certificate, base64 DER.
+    ///
+    /// Pinned by the verifier rather than taken from the report: a chain is
+    /// only worth walking if its root is one you already trust.
+    pub amd_root_der_b64: String,
+    /// Minimum acceptable bootloader SVN.
+    #[serde(default)]
+    pub min_bootloader_svn: u8,
+    /// Minimum acceptable TEE SVN.
+    #[serde(default)]
+    pub min_tee_svn: u8,
+    /// Minimum acceptable SNP firmware SVN.
+    #[serde(default)]
+    pub min_snp_svn: u8,
+    /// Minimum acceptable microcode SVN.
+    #[serde(default)]
+    pub min_microcode_svn: u8,
+    /// Refuse a guest whose launch policy permits debugging. Defaults to true
+    /// through [`Self::secure_defaults`]; a debuggable guest's memory is
+    /// readable by the hypervisor, which nullifies the arrangement.
+    #[serde(default = "default_true")]
+    pub refuse_debuggable_guest: bool,
+    /// The VMPL the report must have been produced at. Cordon runs at 0.
+    #[serde(default)]
+    pub expected_vmpl: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl SevSnpPins {
+    /// Pins with the safe defaults, given a root certificate.
+    pub fn secure_defaults(amd_root_der_b64: String) -> Self {
+        Self {
+            amd_root_der_b64,
+            refuse_debuggable_guest: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Combined attestation report — measurements plus whatever hardware evidence
+/// the platform can produce.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombinedAttestation {
-    /// TPM quote.
+    /// TPM quote. Carries PCR measurements, and on a TPM platform the signed
+    /// quote over them.
     pub tpm_quote: TpmQuote,
     /// TEE measurement.
     pub tee_quote: TeeQuote,
-    /// Canonical digest over both quotes — see [`compute_combined_hash`].
+    /// Confidential-VM evidence, when the platform is one.
+    #[serde(default)]
+    pub platform_evidence: PlatformEvidence,
+    /// Canonical digest over the report's contents — see
+    /// [`compute_combined_hash`].
     pub combined_hash: String,
     /// Cordon node ID.
     pub node_id: String,
@@ -304,6 +414,11 @@ pub struct ExpectedMeasurements {
     pub min_isv_svn: u16,
     /// Accepted TEE type.
     pub tee_type: TeeType,
+    /// Pins for a SEV-SNP platform. `None` means a SEV-SNP report cannot be
+    /// verified — there is no root to chain to — and such a report is refused
+    /// rather than accepted on its measurements alone.
+    #[serde(default)]
+    pub sev_snp: Option<SevSnpPins>,
 }
 
 impl ExpectedMeasurements {
@@ -459,7 +574,8 @@ impl AttestationReport {
         }
 
         // 4. The platform quote, when there is one.
-        let (platform_quote, binds_signing_key) = self.verify_platform_quote(client_nonce)?;
+        let (platform_quote, binds_signing_key) =
+            self.verify_platform_quote(expected, client_nonce)?;
 
         Ok(VerifiedAttestation {
             platform_quote,
@@ -468,11 +584,113 @@ impl AttestationReport {
         })
     }
 
-    /// Check the hardware quote, if the report carries one.
+    /// Check whatever hardware evidence the report carries.
+    ///
+    /// Confidential-VM evidence takes precedence: on a platform that has it,
+    /// it is the stronger claim, and a report that carries it should stand or
+    /// fall on it rather than on a TPM quote alongside.
     fn verify_platform_quote(
         &self,
+        expected: &ExpectedMeasurements,
         client_nonce: &str,
     ) -> CryptoResult<(PlatformQuoteStatus, bool)> {
+        if !matches!(self.combined.platform_evidence, PlatformEvidence::None) {
+            return self.verify_confidential_vm_evidence(expected, client_nonce);
+        }
+        self.verify_tpm_quote(client_nonce)
+    }
+
+    /// Check a confidential-VM report.
+    fn verify_confidential_vm_evidence(
+        &self,
+        expected: &ExpectedMeasurements,
+        client_nonce: &str,
+    ) -> CryptoResult<(PlatformQuoteStatus, bool)> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let PlatformEvidence::SevSnp {
+            report_b64,
+            vcek_der_b64,
+            certificate_chain_b64,
+        } = &self.combined.platform_evidence
+        else {
+            return Ok((PlatformQuoteStatus::Absent, false));
+        };
+
+        let pins = expected.sev_snp.as_ref().ok_or_else(|| {
+            CryptoError::AttestationFailed(
+                "this report carries SEV-SNP evidence, but no AMD root certificate is \
+                 pinned to check it against. A chain is only worth walking if its root \
+                 is one you already trust — pin it under [attestation.expected.sev_snp]."
+                    .into(),
+            )
+        })?;
+
+        let decode = |what: &str, value: &str| -> CryptoResult<Vec<u8>> {
+            B64.decode(value)
+                .map_err(|e| CryptoError::AttestationFailed(format!("malformed {}: {}", what, e)))
+        };
+
+        let report_bytes = decode("SEV-SNP report", report_b64)?;
+        let vcek_der = decode("VCEK certificate", vcek_der_b64)?;
+        let root_der = decode("pinned AMD root certificate", &pins.amd_root_der_b64)?;
+
+        let mut chain: Vec<Vec<u8>> = Vec::with_capacity(certificate_chain_b64.len() + 1);
+        for cert in certificate_chain_b64 {
+            chain.push(decode("certificate in the VCEK chain", cert)?);
+        }
+        // The root the *verifier* pinned terminates the chain, never one the
+        // report supplied.
+        chain.push(root_der);
+        let chain_refs: Vec<&[u8]> = chain.iter().map(|c| c.as_slice()).collect();
+
+        let expectations = crate::sev_snp::SevSnpExpectations {
+            measurement: expected.mrenclave.clone(),
+            minimum_tcb: crate::sev_snp::TcbVersion {
+                bootloader: pins.min_bootloader_svn,
+                tee: pins.min_tee_svn,
+                snp: pins.min_snp_svn,
+                microcode: pins.min_microcode_svn,
+                raw: 0,
+            },
+            refuse_debuggable_guest: pins.refuse_debuggable_guest,
+            expected_vmpl: pins.expected_vmpl,
+        };
+
+        let challenge = confidential_vm_challenge(
+            &self.combined.tee_quote.enclave_signing_key_hex,
+            client_nonce,
+        );
+
+        let (_report, verification) = crate::sev_snp::verify_report(
+            &report_bytes,
+            &vcek_der,
+            &chain_refs,
+            &challenge,
+            &expectations,
+        )?;
+
+        if let Some(failure) = verification.first_failure() {
+            return Err(CryptoError::AttestationFailed(format!(
+                "SEV-SNP attestation failed: {}",
+                failure
+            )));
+        }
+
+        Ok((
+            PlatformQuoteStatus::Verified {
+                // The VCEK chained to a root the verifier pinned, which is
+                // exactly what "this key belongs to genuine hardware" means
+                // here — unlike the TPM path, where the equivalent check is not
+                // yet implemented.
+                ak_is_trusted: true,
+            },
+            !self.combined.tee_quote.enclave_signing_key_hex.is_empty(),
+        ))
+    }
+
+    /// Check the TPM quote, if the report carries one.
+    fn verify_tpm_quote(&self, client_nonce: &str) -> CryptoResult<(PlatformQuoteStatus, bool)> {
         let quote = &self.combined.tpm_quote;
         if !quote.has_hardware_evidence() {
             return Ok((PlatformQuoteStatus::Absent, false));
@@ -538,7 +756,11 @@ impl AttestationReport {
 
     /// Verify the report's digest matches its contents.
     fn verify_combined_hash(&self) -> CryptoResult<()> {
-        let computed = compute_combined_hash(&self.combined.tpm_quote, &self.combined.tee_quote)?;
+        let computed = compute_combined_hash(
+            &self.combined.tpm_quote,
+            &self.combined.tee_quote,
+            &self.combined.platform_evidence,
+        )?;
         if !ct_eq(computed.as_bytes(), self.combined.combined_hash.as_bytes()) {
             return Err(CryptoError::AttestationFailed(
                 "the report's combined hash does not match its contents — it has been \
@@ -568,15 +790,34 @@ pub fn attestation_challenge(enclave_signing_key_hex: &str, client_nonce: &str) 
     hasher.finalize().to_vec()
 }
 
-/// Build the combined attestation digest over both quotes.
+/// The 64 bytes a confidential-VM report commits to.
+///
+/// The same challenge as [`attestation_challenge`], zero-padded to the width of
+/// a SEV-SNP `REPORT_DATA` or TDX `REPORTDATA` field. The padding is part of
+/// the committed value: the hardware signs the whole field, so a verifier must
+/// pad identically or compare against something the platform never saw.
+pub fn confidential_vm_challenge(enclave_signing_key_hex: &str, client_nonce: &str) -> [u8; 64] {
+    let digest = attestation_challenge(enclave_signing_key_hex, client_nonce);
+    let mut padded = [0u8; 64];
+    let len = digest.len().min(64);
+    padded[..len].copy_from_slice(&digest[..len]);
+    padded
+}
+
+/// Build the combined attestation digest over the report's contents.
 ///
 /// Canonically encoded, so a client that deserialized the report computes the
 /// same value the node did.
-pub fn compute_combined_hash(tpm_quote: &TpmQuote, tee_quote: &TeeQuote) -> CryptoResult<String> {
+pub fn compute_combined_hash(
+    tpm_quote: &TpmQuote,
+    tee_quote: &TeeQuote,
+    platform_evidence: &PlatformEvidence,
+) -> CryptoResult<String> {
     let mut writer = CanonicalWriter::new("combined_attestation");
     writer
         .write_section(&tpm_quote.canonical())
-        .write_section(&tee_quote.canonical());
+        .write_section(&tee_quote.canonical())
+        .write_section(&platform_evidence.canonical());
     Ok(writer.digest_hex())
 }
 
@@ -626,11 +867,12 @@ mod tests {
     fn report(nonce: &str) -> AttestationReport {
         let tpm = tpm_quote(nonce);
         let tee = tee_quote();
-        let combined_hash = compute_combined_hash(&tpm, &tee).unwrap();
+        let combined_hash = compute_combined_hash(&tpm, &tee, &PlatformEvidence::None).unwrap();
         AttestationReport {
             combined: CombinedAttestation {
                 tpm_quote: tpm,
                 tee_quote: tee,
+                platform_evidence: PlatformEvidence::None,
                 combined_hash,
                 node_id: "node-1".into(),
                 cordon_version: "2.0.0".into(),
@@ -647,6 +889,7 @@ mod tests {
             mrsigner: "b".repeat(64),
             min_isv_svn: 0,
             tee_type: TeeType::Simulation,
+            sev_snp: None,
         }
     }
 
@@ -683,7 +926,7 @@ mod tests {
             }
             let mut quote = tpm_quote("nonce");
             quote.pcr_values = set;
-            compute_combined_hash(&quote, &tee_quote()).unwrap()
+            compute_combined_hash(&quote, &tee_quote(), &PlatformEvidence::None).unwrap()
         };
 
         let first = digest_of_a_fresh_set();
@@ -706,38 +949,42 @@ mod tests {
 
     #[test]
     fn every_field_is_covered_by_the_combined_hash() {
-        let base = compute_combined_hash(&tpm_quote("n"), &tee_quote()).unwrap();
+        let base =
+            compute_combined_hash(&tpm_quote("n"), &tee_quote(), &PlatformEvidence::None).unwrap();
 
         let mut different_pcr = tpm_quote("n");
         different_pcr.pcr_values.set(0, "sha256:ff".into());
         assert_ne!(
-            compute_combined_hash(&different_pcr, &tee_quote()).unwrap(),
+            compute_combined_hash(&different_pcr, &tee_quote(), &PlatformEvidence::None).unwrap(),
             base
         );
 
         let mut extra_pcr = tpm_quote("n");
         extra_pcr.pcr_values.set(14, "sha256:11".into());
         assert_ne!(
-            compute_combined_hash(&extra_pcr, &tee_quote()).unwrap(),
+            compute_combined_hash(&extra_pcr, &tee_quote(), &PlatformEvidence::None).unwrap(),
             base
         );
 
         assert_ne!(
-            compute_combined_hash(&tpm_quote("other"), &tee_quote()).unwrap(),
+            compute_combined_hash(&tpm_quote("other"), &tee_quote(), &PlatformEvidence::None)
+                .unwrap(),
             base
         );
 
         let mut different_key = tee_quote();
         different_key.enclave_signing_key_hex = "d".repeat(64);
         assert_ne!(
-            compute_combined_hash(&tpm_quote("n"), &different_key).unwrap(),
+            compute_combined_hash(&tpm_quote("n"), &different_key, &PlatformEvidence::None)
+                .unwrap(),
             base
         );
 
         let mut different_source = tee_quote();
         different_source.measurement_source = "tpm2".into();
         assert_ne!(
-            compute_combined_hash(&tpm_quote("n"), &different_source).unwrap(),
+            compute_combined_hash(&tpm_quote("n"), &different_source, &PlatformEvidence::None)
+                .unwrap(),
             base
         );
     }
