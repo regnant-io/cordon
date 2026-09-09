@@ -133,11 +133,22 @@ pub fn build_ui_router(state: AppState) -> Router {
             .max(60),
     );
 
+    // Every route below the first two is the API's own handler, mounted here
+    // rather than reimplemented. The console therefore cannot show an operator
+    // something the API would not: an attestation report it renders is one a
+    // client would receive, an audit read it performs is one the audit log
+    // records, and a policy that refuses a client refuses the console too.
     Router::new()
         .route("/", get(ui::console))
         .route("/api/status", get(ui::status))
         .route("/api/inference", post(handlers::inference))
         .route("/api/inference/stream", post(handlers::inference_stream))
+        .route("/api/attestation", get(handlers::get_attestation))
+        .route("/api/audit/tail", get(handlers::audit_tail))
+        .route("/api/audit/anchor", get(handlers::audit_anchor))
+        .route("/api/audit/verify", get(handlers::audit_verify))
+        .route("/api/runtime", get(handlers::health_runtime))
+        .route("/api/models", get(handlers::list_models))
         .with_state(state)
         .layer(
             ServiceBuilder::new()

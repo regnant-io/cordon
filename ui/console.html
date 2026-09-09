@@ -36,8 +36,19 @@
     --stop:      #9b2226;   /* deep red — refused, tampered */
     --stop-bg:   #f6e3e2;
 
-    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
-    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    /* Type.
+       Nothing is fetched: the console must work on an air-gapped host, and a
+       page that reaches out to a font CDN also announces that a Cordon
+       deployment exists. That rules out webfonts, so the stacks below are
+       written to land well on what machines actually have rather than to name
+       an ideal and fall through to whatever `monospace` happens to be. The
+       preferred faces are kept first for the machines that do have them, and
+       every metric on this page is tuned against the fallbacks. */
+    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, 'SF Mono',
+            'Cascadia Mono', 'Cascadia Code', Menlo, Consolas,
+            'DejaVu Sans Mono', 'Liberation Mono', monospace;
+    --sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+            Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif;
 
     --gutter: clamp(16px, 3vw, 40px);
   }
@@ -226,7 +237,104 @@
     margin-top: 14px;
   }
   .note--signal { border-left-color: var(--signal); }
+  .note--stop   { border-left-color: var(--stop); }
+  .note--ok     { border-left-color: var(--ok); }
   .note strong { color: var(--ink); font-weight: 600; }
+  .note:empty { display: none; }
+
+  /* ── Copyable values ──────────────────────────────────────────────────── */
+
+  /* Long hex values are the things an operator actually needs to move to
+     another machine — a verifying key to check a log with, a chain head to
+     record with a third party. Showing them truncated and making them
+     unselectable would be a strange kind of instrument. */
+  .copy {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: none;
+    border: 1px solid var(--rule-firm);
+    border-radius: 2px;
+    color: var(--ink-3);
+    padding: 1px 6px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color .12s, border-color .12s;
+  }
+  .copy:hover { color: var(--ink); border-color: var(--ink-3); }
+  .copy[data-copied] { color: var(--ok); border-color: var(--ok); }
+
+  /* ── Actions row ──────────────────────────────────────────────────────── */
+
+  .actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin: 14px 0 4px;
+  }
+
+  button.small {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--rule-firm);
+    border-radius: 2px;
+    padding: 6px 13px;
+    cursor: pointer;
+    transition: border-color .12s, color .12s;
+  }
+  button.small:hover:not(:disabled) { border-color: var(--signal); color: var(--signal); }
+  button.small:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ── Log / entry lists ────────────────────────────────────────────────── */
+
+  .entries {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .entry {
+    display: grid;
+    grid-template-columns: 52px 132px 1fr;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--rule);
+    align-items: baseline;
+  }
+  .entry-seq  { color: var(--ink-3); text-align: right; }
+  .entry-kind { color: var(--signal); }
+  .entry-time { color: var(--ink-2); word-break: break-all; }
+  @media (max-width: 620px) {
+    .entry { grid-template-columns: 44px 1fr; }
+    .entry-time { grid-column: 1 / -1; padding-left: 56px; }
+  }
+
+  pre.raw {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--ink-2);
+    margin-top: 12px;
+    max-height: 340px;
+  }
+
+  .placeholder {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--ink-3);
+    padding: 18px 0;
+  }
 
   /* ── Console ──────────────────────────────────────────────────────────── */
 
@@ -436,6 +544,8 @@
 
 <nav class="tabs" role="tablist">
   <button role="tab" aria-selected="true"  data-panel="overview">Overview</button>
+  <button role="tab" aria-selected="false" data-panel="attestation">Attestation</button>
+  <button role="tab" aria-selected="false" data-panel="audit">Audit</button>
   <button role="tab" aria-selected="false" data-panel="console">Console</button>
   <button role="tab" aria-selected="false" data-panel="api">API</button>
 </nav>
@@ -468,6 +578,10 @@
             <div><dt>Latency p50/p99</dt><dd id="o-latency">—</dd></div>
           </dl>
           <p class="note" id="o-runtime-note"></p>
+          <div class="actions">
+            <button class="small" id="o-logs-toggle">Show runtime output</button>
+          </div>
+          <pre class="raw" id="o-logs" hidden>—</pre>
         </section>
 
         <section>
@@ -496,6 +610,96 @@
         <section>
           <h2>Model store</h2>
           <div id="o-bundles"></div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Attestation ───────────────────────────────────────────────────── -->
+  <div class="panel" data-panel="attestation">
+    <div class="scroll">
+      <div class="measure">
+
+        <section>
+          <h2>Challenge this node</h2>
+          <p class="note">A report is evidence only if it commits to a value
+            <strong>you</strong> chose. This issues a fresh nonce, asks the node
+            for a report bound to it, and shows what that report does and does
+            not establish. The same request a client would make.</p>
+          <div class="actions">
+            <button class="small" id="a-fetch">Request a report</button>
+            <span class="masthead-meta" id="a-nonce">—</span>
+          </div>
+        </section>
+
+        <section>
+          <h2>What this report establishes</h2>
+          <dl class="readout">
+            <div><dt>Measurement source</dt>  <dd id="a-source">—</dd></div>
+            <div><dt>Platform quote</dt>      <dd id="a-quote">—</dd></div>
+            <div><dt>Binds the signing key</dt><dd id="a-binds">—</dd></div>
+            <div><dt>Measurements pinned</dt> <dd id="a-pinned">—</dd></div>
+            <div><dt>Measurement</dt>         <dd id="a-mrenclave">—</dd></div>
+            <div><dt>Signing key</dt>         <dd id="a-key">—</dd></div>
+          </dl>
+          <p class="note" id="a-verdict"></p>
+        </section>
+
+        <section>
+          <h2>Pin these measurements</h2>
+          <p class="note">Verification compares a report against values the
+            operator pinned. A node with nothing pinned cannot be verified
+            against anything, and says so rather than verifying trivially.
+            Review these, then commit them.</p>
+          <div class="actions">
+            <button class="small" id="a-copy-pin">Copy the config block</button>
+          </div>
+          <pre class="raw" id="a-pin">Request a report to see the block.</pre>
+        </section>
+
+        <section>
+          <h2>The report</h2>
+          <pre class="raw" id="a-raw">—</pre>
+        </section>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Audit ─────────────────────────────────────────────────────────── -->
+  <div class="panel" data-panel="audit">
+    <div class="scroll">
+      <div class="measure">
+
+        <section>
+          <h2>Chain</h2>
+          <dl class="readout">
+            <div><dt>Entries</dt>    <dd id="d-entries">—</dd></div>
+            <div><dt>Chain head</dt> <dd id="d-head">—</dd></div>
+            <div><dt>Verdict</dt>    <dd id="d-verdict">—</dd></div>
+          </dl>
+          <div class="actions">
+            <button class="small" id="d-verify">Verify the whole chain</button>
+            <button class="small" id="d-anchor">Take an anchor</button>
+          </div>
+          <p class="note" id="d-note">Verifying recomputes every hash and checks
+            every signature. It is linear in the size of the log, so it runs on a
+            blocking thread — expect it to take a moment on a large one.</p>
+          <pre class="raw" id="d-anchor-out" hidden></pre>
+        </section>
+
+        <section>
+          <h2>Recent entries</h2>
+          <p class="note">Newest last. The log records hashes, token counts and
+            policy outcomes — never prompts or completions. Reading it is itself
+            recorded, so this list will show its own access.</p>
+          <div class="actions">
+            <button class="small" id="d-refresh">Refresh</button>
+          </div>
+          <div class="entries" id="d-entries-list">
+            <p class="placeholder">Loading…</p>
+          </div>
         </section>
 
       </div>
@@ -624,8 +828,16 @@
         else p.removeAttribute('data-active');
       });
       if (tab.dataset.panel === 'console') $('prompt').focus();
+      // Loading the log on first view rather than on every poll keeps a read
+      // of the audit log — which is itself audited — an act, not a background
+      // habit that fills the log with records of the console looking at it.
+      if (tab.dataset.panel === 'audit' && !auditLoaded) {
+        auditLoaded = true;
+        loadEntries();
+      }
     });
   });
+  let auditLoaded = false;
 
   // ── Rendering helpers ───────────────────────────────────────────────────
   const chip = (text, kind) => {
@@ -638,6 +850,60 @@
   const setText = (el, text) => { el.textContent = text ?? '—'; };
   const shorten = (s, n = 20) =>
     !s ? '—' : (s.length <= n * 2 ? s : `${s.slice(0, n)}…${s.slice(-8)}`);
+
+  // A truncated key is unusable. Show the short form and put the whole value
+  // one click away, so an operator can move it to the machine that needs it.
+  function setCopyable(el, value, display) {
+    el.textContent = '';
+    if (!value) { el.textContent = '—'; return; }
+
+    const text = document.createElement('span');
+    text.textContent = display ?? shorten(value);
+    el.appendChild(text);
+
+    const button = document.createElement('button');
+    button.className = 'copy';
+    button.type = 'button';
+    button.textContent = 'copy';
+    button.title = value;
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch {
+        // A console served over plain HTTP on some browsers has no clipboard
+        // API. Select the value instead so a manual copy still works.
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        text.textContent = value;
+        return;
+      }
+      button.textContent = 'copied';
+      button.setAttribute('data-copied', '');
+      setTimeout(() => {
+        button.textContent = 'copy';
+        button.removeAttribute('data-copied');
+      }, 1400);
+    });
+    el.appendChild(button);
+  }
+
+  const jsonOf = async (res) => {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(`${body.error ?? res.status}: ${body.message ?? 'request failed'}`);
+    }
+    return body;
+  };
+
+  /** A nonce a client would issue: 128 bits of randomness, hex. */
+  function freshNonce() {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
 
   const duration = (secs) => {
     if (secs == null) return '—';
@@ -701,7 +967,7 @@
     setChip($('o-keys'), data.trust?.key_provenance ?? '—', cmk ? 'ok' : 'warn');
     const hw = data.trust?.hardware_measurements;
     setChip($('o-measure'), data.trust?.measurement_source ?? '—', hw ? 'ok' : 'warn');
-    setText($('o-mrenclave'), shorten(data.trust?.mrenclave));
+    setCopyable($('o-mrenclave'), data.trust?.mrenclave);
     setText($('o-verified'), data.trust?.verified_clients ?? 0);
 
     $('o-trust-note').textContent = cmk && hw
@@ -712,11 +978,17 @@
 
     // Audit
     setText($('o-entries'), data.audit?.entries_total ?? 0);
-    setText($('o-head'), shorten(data.audit?.chain_head));
+    setCopyable($('o-head'), data.audit?.chain_head);
     const cv = data.audit?.chain_valid;
     setChip($('o-chain'), cv === null || cv === undefined ? 'not yet checked' : (cv ? 'intact' : 'broken'),
             cv === true ? 'ok' : cv === false ? 'stop' : 'muted');
-    setText($('o-logkey'), shorten(data.audit?.log_verifying_key));
+    setCopyable($('o-logkey'), data.audit?.log_verifying_key);
+
+    // The audit panel reads the same values.
+    setText($('d-entries'), data.audit?.entries_total ?? 0);
+    setCopyable($('d-head'), data.audit?.chain_head);
+    setChip($('d-verdict'), cv === null || cv === undefined ? 'not yet checked' : (cv ? 'intact' : 'broken'),
+            cv === true ? 'ok' : cv === false ? 'stop' : 'muted');
 
     // Bundles
     const host = $('o-bundles');
@@ -751,6 +1023,231 @@
 
   refresh();
   setInterval(refresh, 5000);
+
+  // ── Runtime output ──────────────────────────────────────────────────────
+  // When the runtime will not start, its own stderr is the only thing that
+  // says why. It is behind a button because it is diagnostic rather than
+  // posture, and because a runtime under load is noisy.
+  $('o-logs-toggle').addEventListener('click', async () => {
+    const box = $('o-logs');
+    if (!box.hidden) {
+      box.hidden = true;
+      $('o-logs-toggle').textContent = 'Show runtime output';
+      return;
+    }
+    box.hidden = false;
+    box.textContent = 'Loading…';
+    $('o-logs-toggle').textContent = 'Hide runtime output';
+    try {
+      const data = await jsonOf(await fetch('/api/runtime', { cache: 'no-store' }));
+      const lines = data.recent_output ?? [];
+      box.textContent = lines.length
+        ? lines.join('\n')
+        : 'The runtime has produced no output. With runtime.backend = "none" there is no child process to produce any.';
+    } catch (e) {
+      box.textContent = String(e.message ?? e);
+    }
+  });
+
+  // ── Attestation ─────────────────────────────────────────────────────────
+  let lastReport = null;
+
+  function renderAttestation(body, nonce) {
+    const report = body.report ?? {};
+    const tee = report.combined?.tee_quote ?? {};
+    const tpm = report.combined?.tpm_quote ?? {};
+    const evidence = report.combined?.platform_evidence ?? { kind: 'none' };
+
+    $('a-nonce').textContent = `nonce ${nonce}`;
+
+    const source = tee.measurement_source ?? '—';
+    const hardware = source === 'tpm2' || source === 'sev_snp';
+    setChip($('a-source'), source, hardware ? 'ok' : 'warn');
+
+    // A quote is present when there is something a verifier could check: a
+    // confidential-VM report, or a TPM quote carrying the message it signed.
+    const confidential = evidence.kind && evidence.kind !== 'none';
+    const tpmQuote = Boolean(tpm.attest_message_hex) && Boolean(tpm.quote_signature_hex);
+    const quote = confidential ? evidence.kind : tpmQuote ? 'tpm 2.0' : 'absent';
+    setChip($('a-quote'), quote, confidential || tpmQuote ? 'ok' : 'warn');
+
+    const binds = Boolean(tee.enclave_signing_key_hex);
+    setChip($('a-binds'), binds ? 'yes' : 'no', binds ? 'ok' : 'warn');
+
+    const pinned = body.measurements_are_pinned;
+    setChip($('a-pinned'), pinned ? 'yes' : 'no', pinned ? 'ok' : 'stop');
+
+    setCopyable($('a-mrenclave'), tee.mrenclave);
+    setCopyable($('a-key'), tee.enclave_signing_key_hex);
+
+    const verdict = $('a-verdict');
+    verdict.className = 'note';
+    if (!pinned) {
+      verdict.classList.add('note--stop');
+      verdict.textContent =
+        'Nothing is pinned, so this report cannot be verified against anything. '
+        + 'Capture the values below into [attestation.expected] and restart.';
+    } else if (!confidential && !tpmQuote) {
+      verdict.classList.add('note--signal');
+      verdict.textContent =
+        'A software measurement. It attests that Cordon is running the configuration '
+        + 'the operator expects, and nothing about the platform underneath it — an '
+        + 'attacker with code execution on this host can reproduce it exactly.';
+    } else if (!binds) {
+      verdict.classList.add('note--signal');
+      verdict.textContent =
+        'The platform signed for these measurements, but the report declares no '
+        + 'response-signing key, so nothing connects this attestation to the '
+        + 'signatures on inference responses.';
+    } else {
+      verdict.classList.add('note--ok');
+      verdict.textContent = confidential
+        ? 'The platform signed a report committing to your challenge and to the key that '
+          + 'signs responses, and this node runs inside a confidential VM — its memory is '
+          + 'not readable by whoever runs the host.'
+        : 'The TPM signed a quote committing to your challenge and to the key that signs '
+          + 'responses. Note what a TPM does not give you: it attests how this machine '
+          + 'booted, not that its memory is private from whoever owns it.';
+    }
+
+    // The pinnable block, in the shape cordon.toml wants.
+    const pcrs = tpm.pcr_values?.values ?? {};
+    const lines = [
+      '# Measurements read from the node. Review them before committing.',
+      '[attestation.expected]',
+      `mrenclave   = "${tee.mrenclave ?? ''}"`,
+      `mrsigner    = "${tee.mrsigner ?? ''}"`,
+      'min_isv_svn = 0',
+    ];
+    const indices = Object.keys(pcrs).map(Number).sort((a, b) => a - b);
+    if (indices.length) {
+      lines.push('', '[attestation.expected.pcr_values]');
+      for (const i of indices) lines.push(`${i} = "${pcrs[String(i)]}"`);
+    }
+    $('a-pin').textContent = lines.join('\n');
+
+    $('a-raw').textContent = JSON.stringify(report, null, 2);
+    lastReport = lines.join('\n');
+  }
+
+  $('a-fetch').addEventListener('click', async () => {
+    const button = $('a-fetch');
+    button.disabled = true;
+    button.textContent = 'Requesting…';
+    const nonce = freshNonce();
+    try {
+      const body = await jsonOf(await fetch(
+        `/api/attestation?nonce=${encodeURIComponent(nonce)}`,
+        { cache: 'no-store', headers: { 'x-client-id': 'console' } },
+      ));
+      renderAttestation(body, nonce);
+    } catch (e) {
+      $('a-verdict').className = 'note note--stop';
+      $('a-verdict').textContent = String(e.message ?? e);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Request a report';
+    }
+  });
+
+  $('a-copy-pin').addEventListener('click', async () => {
+    if (!lastReport) return;
+    try {
+      await navigator.clipboard.writeText(lastReport);
+      $('a-copy-pin').textContent = 'Copied';
+      setTimeout(() => { $('a-copy-pin').textContent = 'Copy the config block'; }, 1400);
+    } catch {
+      $('a-copy-pin').textContent = 'Select it manually';
+    }
+  });
+
+  // ── Audit ───────────────────────────────────────────────────────────────
+  async function loadEntries() {
+    const host = $('d-entries-list');
+    try {
+      const data = await jsonOf(await fetch('/api/audit/tail?n=40', {
+        cache: 'no-store', headers: { 'x-client-id': 'console' },
+      }));
+      const entries = data.entries ?? [];
+      host.textContent = '';
+      if (!entries.length) {
+        const p = document.createElement('p');
+        p.className = 'placeholder';
+        p.textContent = 'The log is empty.';
+        host.appendChild(p);
+        return;
+      }
+      for (const e of entries) {
+        const row = document.createElement('div');
+        row.className = 'entry';
+
+        const seq = document.createElement('span');
+        seq.className = 'entry-seq';
+        seq.textContent = e.sequence;
+
+        const kind = document.createElement('span');
+        kind.className = 'entry-kind';
+        kind.textContent = e.event_type;
+
+        const when = document.createElement('span');
+        when.className = 'entry-time';
+        when.textContent = e.timestamp;
+
+        row.append(seq, kind, when);
+        host.appendChild(row);
+      }
+    } catch (e) {
+      host.textContent = '';
+      const p = document.createElement('p');
+      p.className = 'placeholder';
+      p.textContent = String(e.message ?? e);
+      host.appendChild(p);
+    }
+  }
+
+  $('d-refresh').addEventListener('click', loadEntries);
+
+  $('d-verify').addEventListener('click', async () => {
+    const button = $('d-verify');
+    const note = $('d-note');
+    button.disabled = true;
+    button.textContent = 'Verifying…';
+    try {
+      const data = await jsonOf(await fetch('/api/audit/verify', {
+        cache: 'no-store', headers: { 'x-client-id': 'console' },
+      }));
+      setChip($('d-verdict'), data.valid ? 'intact' : 'broken', data.valid ? 'ok' : 'stop');
+      note.className = data.valid ? 'note note--ok' : 'note note--stop';
+      note.textContent = data.valid
+        ? `${data.entries_verified} entries verified against ${data.key_provenance === 'cmk_derived'
+            ? 'a key derived from the Client Master Key'
+            : 'a key this node generated for itself — which proves only that the node agrees with itself'}.`
+        : `The chain does not verify: ${(data.violations ?? []).slice(0, 3).join(' · ')}`;
+    } catch (e) {
+      note.className = 'note note--stop';
+      note.textContent = String(e.message ?? e);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Verify the whole chain';
+    }
+  });
+
+  $('d-anchor').addEventListener('click', async () => {
+    const box = $('d-anchor-out');
+    box.hidden = false;
+    box.textContent = 'Taking an anchor…';
+    try {
+      const data = await jsonOf(await fetch('/api/audit/anchor', {
+        cache: 'no-store', headers: { 'x-client-id': 'console' },
+      }));
+      box.textContent =
+        `# Record this somewhere this operator does not control. Any later rewrite\n`
+        + `# of the log before sequence ${data.sequence} then becomes detectable.\n\n`
+        + JSON.stringify(data, null, 2);
+    } catch (e) {
+      box.textContent = String(e.message ?? e);
+    }
+  });
 
   // ── Console ─────────────────────────────────────────────────────────────
   const transcript = $('transcript');

@@ -181,6 +181,16 @@ fn classify(err: &CordonError) -> (StatusCode, &'static str, String) {
             "the request was refused because it could not be recorded in the audit log".to_string(),
         ),
 
+        // A startup condition. It should never reach a client, since a node
+        // that could not claim its log never began serving — but it is
+        // classified rather than folded into the generic internal error so a
+        // stray occurrence is recognisable in the logs.
+        AuditLogUnavailable(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "audit_log_unavailable",
+            "the node's audit log is not available, so it is not serving".to_string(),
+        ),
+
         KeyError(_) | ConfigError(_) | OutputFilterError(_) | Internal(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",

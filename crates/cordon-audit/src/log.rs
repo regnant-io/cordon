@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{AuditError, AuditResult};
@@ -94,11 +94,93 @@ struct LogState {
     bytes_written: u64,
 }
 
+/// Name of the file that marks a log directory as having a live writer.
+const WRITER_LOCK: &str = ".cordon-writer.lock";
+
+/// An exclusive claim on a log directory, released when the log is dropped.
+///
+/// # Why this exists
+///
+/// Two Cordon processes pointed at one audit directory both read the highest
+/// sequence, both continue from it, and both append. The chain forks: two
+/// entries claim the same sequence, and neither hashes to the other's
+/// predecessor. The verifier then reports a broken chain — which is exactly
+/// what it should report, and exactly the wrong conclusion for an operator to
+/// draw, because it reads as tampering when it was a second node started by
+/// mistake.
+///
+/// A tamper-evident log that cries tamper over an operational slip is worse
+/// than useless: it trains people to disbelieve it. So the second writer is
+/// refused instead.
+struct WriterLock {
+    path: PathBuf,
+}
+
+impl WriterLock {
+    /// Claim `log_dir`, or explain who already has it.
+    fn acquire(log_dir: &Path, node_id: &str) -> AuditResult<Self> {
+        let path = log_dir.join(WRITER_LOCK);
+
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        match options.open(&path) {
+            Ok(mut file) => {
+                let _ = writeln!(file, "node_id={}", node_id);
+                let _ = writeln!(file, "pid={}", std::process::id());
+                let _ = writeln!(file, "since={}", Utc::now().to_rfc3339());
+                let _ = file.sync_all();
+                Ok(Self { path })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let holder = std::fs::read_to_string(&path).unwrap_or_default();
+                Err(AuditError::AlreadyLocked(format!(
+                    "another Cordon node is already writing to the audit log at {}.\n\n{}\n\
+                     Two writers fork the hash chain: both continue from the same \
+                     sequence, and the log then fails verification as though it had been \
+                     tampered with. Point this node at its own audit directory.\n\n\
+                     If no node is running, the previous one did not shut down cleanly. \
+                     Verify the chain with cordon-verify-log, then remove {} to release \
+                     the claim.",
+                    log_dir.display(),
+                    holder.trim(),
+                    path.display()
+                )))
+            }
+            Err(e) => Err(AuditError::IoError(format!(
+                "cannot claim the audit log at {}: {}",
+                log_dir.display(),
+                e
+            ))),
+        }
+    }
+}
+
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            tracing::warn!(
+                path = %self.path.display(),
+                "could not release the audit log claim: {}. Remove the file before \
+                 starting another node against this directory.",
+                e
+            );
+        }
+    }
+}
+
 /// Merkle-chained audit log
 pub struct AuditLog {
     config: LogConfig,
     signing_key: SigningKey,
     state: Mutex<Option<LogState>>,
+    /// Held for the life of the log. Dropping it releases the directory.
+    _writer_lock: WriterLock,
 }
 
 impl AuditLog {
@@ -106,14 +188,20 @@ impl AuditLog {
     ///
     /// If the log directory exists and contains entries, resumes from the last entry.
     /// If the directory is empty or new, creates a genesis entry.
+    ///
+    /// Claims the directory exclusively: a second node pointed at the same one
+    /// is refused rather than allowed to fork the chain. See [`WriterLock`].
     pub fn open(config: LogConfig, signing_key: SigningKey) -> AuditResult<Self> {
         std::fs::create_dir_all(&config.log_dir)
             .map_err(|e| AuditError::IoError(format!("Cannot create log dir: {}", e)))?;
+
+        let writer_lock = WriterLock::acquire(&config.log_dir, &config.node_id)?;
 
         let log = Self {
             config,
             signing_key,
             state: Mutex::new(None),
+            _writer_lock: writer_lock,
         };
 
         log.initialize()?;

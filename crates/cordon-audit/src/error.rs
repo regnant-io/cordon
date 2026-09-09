@@ -12,6 +12,15 @@ pub enum AuditError {
     #[error("Audit log write failed: {0}")]
     WriteFailed(String),
 
+    /// Another process holds the log directory.
+    ///
+    /// Distinct from a write failure because the remedy is entirely different:
+    /// nothing is wrong with the log, and the node needs a different directory
+    /// or the other node stopped. Folding it into `WriteFailed` produced a
+    /// startup error that talked about rejected requests.
+    #[error("{0}")]
+    AlreadyLocked(String),
+
     /// Chain integrity violation
     #[error("Chain integrity violation at entry {entry_id}: {reason}")]
     ChainViolation {
