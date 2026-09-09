@@ -107,6 +107,46 @@ struct NodeKeys {
     allow_unregistered_models: bool,
 }
 
+/// The compiled content policies a node serves under.
+///
+/// One default, plus one per distinct policy file any enrolled client points
+/// at. Selection is by client, so `permitted_models` decides *what* a client
+/// may ask for and this decides what it may be told.
+pub struct OutputFilters {
+    /// Applied to any client with no policy of its own.
+    default: Arc<OutputFilter>,
+    /// Compiled policies, keyed by the path they were loaded from.
+    by_path: std::collections::HashMap<std::path::PathBuf, Arc<OutputFilter>>,
+}
+
+impl OutputFilters {
+    /// The filter for a client, falling back to the node default.
+    ///
+    /// A policy path that names a file no filter was compiled for cannot occur:
+    /// every path in the registry is compiled at startup, and a registry that
+    /// changes needs a restart. Should one appear anyway, the default applies —
+    /// which is the safe direction, since the default is what an unenrolled
+    /// client already gets.
+    pub fn for_client(&self, policy: &crate::identity::ClientPolicy) -> Arc<OutputFilter> {
+        policy
+            .content_policy_path
+            .as_ref()
+            .and_then(|path| self.by_path.get(path))
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
+    }
+
+    /// The node's default filter.
+    pub fn default_filter(&self) -> Arc<OutputFilter> {
+        self.default.clone()
+    }
+
+    /// How many distinct policies are compiled, including the default.
+    pub fn compiled_count(&self) -> usize {
+        self.by_path.len() + 1
+    }
+}
+
 /// A complete Cordon node.
 pub struct CordonNode {
     /// Validated node configuration.
@@ -122,8 +162,15 @@ pub struct CordonNode {
     pub model_store: Arc<ModelStore>,
     /// Inference engine.
     pub inference: Arc<InferenceEngine>,
-    /// Output content filter.
-    pub output_filter: Arc<OutputFilter>,
+    /// Output content filters, compiled at startup.
+    ///
+    /// Content policy is per client: two callers of the same model can be held
+    /// to different rules, which is the point of having a policy engine at all.
+    /// The filters are compiled once here so a malformed regular expression is
+    /// a startup failure rather than a request failure — failing a request is
+    /// exactly the wrong moment to discover that the rule meant to redact its
+    /// output does not compile.
+    pub output_filter: OutputFilters,
     /// Covert-channel detector.
     pub covert_channel: Arc<CovertChannelDetector>,
     /// Timing normalizer.
@@ -182,6 +229,9 @@ pub struct StreamingSession {
     pub meta: StreamingMeta,
     /// The runtime's chunk stream, unfiltered.
     pub stream: TokenStream,
+    /// The content policy enrolled for this client, resolved at admission so
+    /// the streaming path applies exactly the rules the unary path would.
+    pub output_filter: Arc<OutputFilter>,
     /// Concurrency slot and session lease, released on drop.
     _lease: crate::inference::InferenceLease,
 }
@@ -300,9 +350,7 @@ impl CordonNode {
             config.inference.max_concurrent_requests as usize * 64,
         ));
 
-        let output_filter = Arc::new(OutputFilter::new(&ContentPolicy::default_permissive(
-            "all",
-        ))?);
+        let output_filter = Self::compile_content_policies(&config, &identity)?;
 
         let covert_channel = Arc::new(CovertChannelDetector::new(CovertChannelConfig {
             detection_threshold: config.sustained_attack.covert_channel_score_threshold,
@@ -357,6 +405,55 @@ impl CordonNode {
             staged_model,
             started_at: Instant::now(),
         })
+    }
+
+    /// Compile every content policy the deployment references.
+    ///
+    /// The node's default comes from `content_policy.default_path` when one is
+    /// set, and otherwise from [`ContentPolicy::default_permissive`], which only
+    /// flags PII. That default is deliberately weak — a node should not start
+    /// silently redacting output nobody asked it to — but it is a default, not
+    /// the only option, which is what it amounted to before: the policy engine
+    /// was fully implemented and had no way to be configured.
+    fn compile_content_policies(
+        config: &CordonConfig,
+        identity: &IdentityRegistry,
+    ) -> CordonResult<OutputFilters> {
+        let default = match &config.content_policy.default_path {
+            Some(path) => {
+                let policy = ContentPolicy::from_file(path)?;
+                tracing::info!(
+                    path = %path.display(),
+                    rules = policy.rules.len(),
+                    "Default content policy loaded"
+                );
+                Arc::new(OutputFilter::new(&policy)?)
+            }
+            None => {
+                tracing::info!(
+                    "No default content policy configured; output is checked for PII and \
+                     otherwise released unaltered. Set content_policy.default_path to \
+                     apply rules of your own."
+                );
+                Arc::new(OutputFilter::new(&ContentPolicy::default_permissive(
+                    "default",
+                ))?)
+            }
+        };
+
+        let mut by_path = std::collections::HashMap::new();
+        for path in identity.content_policy_paths() {
+            let policy = ContentPolicy::from_file(&path)?;
+            tracing::info!(
+                path = %path.display(),
+                client = %policy.client_id,
+                rules = policy.rules.len(),
+                "Client content policy loaded"
+            );
+            by_path.insert(path, Arc::new(OutputFilter::new(&policy)?));
+        }
+
+        Ok(OutputFilters { default, by_path })
     }
 
     /// Derive the deployment's key set from the CMK, or generate an ephemeral
@@ -646,6 +743,67 @@ impl CordonNode {
         self.audit.verifying_key().to_hex()
     }
 
+    /// Whether an authenticated client is permitted to attempt admin commands.
+    ///
+    /// This is the *enrolment* half of admin authorization, and it is separate
+    /// from the signature. A signature proves the operator authorized a
+    /// particular command; `admin_allowed` decides which enrolled clients may
+    /// carry one. Both apply, and the weaker one is checked first so an
+    /// unprivileged client is refused before the node does any cryptography on
+    /// its behalf.
+    ///
+    /// A deployment that has enrolled nobody is not running an access-control
+    /// regime, and this follows the same rule the registry already applies to
+    /// unknown clients: enrolling anyone is taken as intent to restrict. Until
+    /// then the admin signature is the only gate, which is the development
+    /// posture `CORDON_INSECURE_ADMIN` exists for.
+    pub fn client_may_administer(&self, client: &ClientIdentity) -> CordonResult<()> {
+        if !self.enforces_client_privileges() {
+            return Ok(());
+        }
+        let policy = self.identity.verify(client)?;
+        if !policy.admin_allowed {
+            return Err(CordonError::AdminRejected(format!(
+                "client {} is not enrolled for administrative actions. Set \
+                 admin_allowed = true for it in the client registry.",
+                client.client_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether an authenticated client may read the audit log.
+    ///
+    /// The log records which clients asked for what, how often, and with what
+    /// outcome. That is exactly the traffic analysis one tenant should not be
+    /// able to run against another, so reading it is a privilege rather than a
+    /// consequence of being enrolled. Subject to the same "enrolling is intent
+    /// to restrict" rule as [`Self::client_may_administer`].
+    pub fn client_may_read_audit_log(&self, client: &ClientIdentity) -> CordonResult<()> {
+        if !self.enforces_client_privileges() {
+            return Ok(());
+        }
+        let policy = self.identity.verify(client)?;
+        if !policy.log_export_allowed {
+            return Err(CordonError::AuthFailed(format!(
+                "client {} is not permitted to read the audit log. Set \
+                 log_export_allowed = true for it in the client registry.",
+                client.client_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether per-client privilege flags are in force.
+    ///
+    /// They are once any client has been enrolled. Before that the registry
+    /// admits unknown callers with default limits, and refusing them a
+    /// privilege they were never given a way to hold would just break the
+    /// development path without protecting anything.
+    fn enforces_client_privileges(&self) -> bool {
+        self.identity.unknown_client_policy() == crate::identity::UnknownClientPolicy::Deny
+    }
+
     /// Authorize an administrative command.
     ///
     /// The signature must be Ed25519 over `CORDON_ADMIN:{action}:{params}` under
@@ -882,7 +1040,11 @@ impl CordonNode {
         let started = Instant::now();
         let request_id = Uuid::new_v4();
 
-        self.admit(client, model_id, &messages, &params)?;
+        let policy = self.admit(client, model_id, &messages, &params)?;
+        // The filter is chosen from the policy admission just returned, so the
+        // rules applied to a response are the ones enrolled for the client that
+        // asked for it.
+        let output_filter = self.output_filter.for_client(&policy);
 
         let input_hash = hash_messages(&messages);
 
@@ -948,7 +1110,7 @@ impl CordonNode {
             raw.completion_tokens(),
         );
 
-        let filtered = self.output_filter.filter(raw.text.clone());
+        let filtered = output_filter.filter(raw.text.clone());
 
         if filtered.blocked {
             self.metrics.content_policy_hits_total.inc();
@@ -1091,7 +1253,8 @@ impl CordonNode {
         }
 
         let request_id = Uuid::new_v4();
-        self.admit(client, model_id, &messages, &params)?;
+        let policy = self.admit(client, model_id, &messages, &params)?;
+        let output_filter = self.output_filter.for_client(&policy);
 
         let input_hash = hash_messages(&messages);
         if self
@@ -1158,6 +1321,7 @@ impl CordonNode {
                 started: Instant::now(),
             },
             stream,
+            output_filter,
             // Held for the life of the session; dropping it releases the
             // concurrency slot and tears down an ephemeral session.
             _lease: lease,

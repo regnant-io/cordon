@@ -606,3 +606,188 @@ fn shard_encryption_detects_the_wrong_key_and_tampering() {
     corrupted[0] ^= 0x01;
     assert!(decrypt_shard(&key, &corrupted, &nonce).is_err());
 }
+
+// ─── Per-client content policy ───────────────────────────────────────────────
+
+/// Write a content policy that redacts a literal token.
+fn write_policy(
+    dir: &std::path::Path,
+    name: &str,
+    client_id: &str,
+    token: &str,
+) -> std::path::PathBuf {
+    let path = dir.join(format!("{}.json", name));
+    let policy = serde_json::json!({
+        "version": "1.0",
+        "client_id": client_id,
+        "rules": [{
+            "rule_id": format!("redact-{}", name),
+            "description": "redact a marker token",
+            "rule_type": { "type": "token_blocklist", "tokens": [token] },
+            "action": "redact",
+            "enabled": true
+        }]
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&policy).unwrap()).unwrap();
+    path
+}
+
+fn write_registry(dir: &std::path::Path, policies: &[ClientPolicy]) -> std::path::PathBuf {
+    let path = dir.join("clients.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(policies).unwrap()).unwrap();
+    path
+}
+
+/// The gap this closes: the policy engine was fully implemented — redact,
+/// truncate, block, PII, topics — and nothing in the configuration could reach
+/// it. Every client got one built-in rule that only flagged PII.
+#[tokio::test]
+async fn a_clients_own_content_policy_is_applied_to_its_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // The placeholder runtime echoes the prompt back, so a rule matching a
+    // token in the prompt is observable in the response.
+    let strict = write_policy(dir.path(), "strict", "strict-client", "SENSITIVE");
+
+    let mut restricted = ClientPolicy::default_for("strict-client");
+    restricted.content_policy_path = Some(strict);
+    let permissive = ClientPolicy::default_for("open-client");
+    let registry = write_registry(dir.path(), &[restricted, permissive]);
+
+    let mut config = test_config(dir.path(), "per-client-policy");
+    config.client_registry_path = Some(registry);
+    let node = Arc::new(CordonNode::build(config).await.unwrap());
+    node.go_operational().unwrap();
+
+    let restricted_output = infer(&node, "strict-client", "please repeat SENSITIVE back")
+        .await
+        .unwrap();
+    assert!(
+        !restricted_output.contains("SENSITIVE"),
+        "the client's own policy should have redacted it: {}",
+        restricted_output
+    );
+    assert!(restricted_output.contains("[REDACTED]"));
+
+    // A different client, enrolled without that policy, is unaffected.
+    let open_output = infer(&node, "open-client", "please repeat SENSITIVE back")
+        .await
+        .unwrap();
+    assert!(
+        open_output.contains("SENSITIVE"),
+        "a client without that policy should not be filtered by it: {}",
+        open_output
+    );
+}
+
+#[tokio::test]
+async fn a_default_content_policy_covers_clients_with_none_of_their_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let default_policy = write_policy(dir.path(), "house", "default", "CONFIDENTIAL");
+
+    let mut config = test_config(dir.path(), "default-policy");
+    config.content_policy.default_path = Some(default_policy);
+    let node = Arc::new(CordonNode::build(config).await.unwrap());
+    node.go_operational().unwrap();
+
+    let output = infer(&node, "anyone", "say CONFIDENTIAL please")
+        .await
+        .unwrap();
+    assert!(!output.contains("CONFIDENTIAL"), "got: {}", output);
+    assert!(output.contains("[REDACTED]"));
+}
+
+/// A rule that does not compile must stop the node, not the request that needed
+/// it. Discovering a broken redaction rule at the moment it was supposed to
+/// redact something is the worst possible time.
+#[tokio::test]
+async fn a_malformed_content_policy_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("broken.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": "1.0",
+            "client_id": "x",
+            "rules": [{
+                "rule_id": "bad",
+                "description": "an unclosed group",
+                "rule_type": { "type": "pattern_filter", "pattern": "(unclosed", "replacement": null },
+                "action": "redact",
+                "enabled": true
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut config = test_config(dir.path(), "broken-policy");
+    config.content_policy.default_path = Some(path);
+    assert!(
+        CordonNode::build(config).await.is_err(),
+        "a policy that cannot compile must prevent startup"
+    );
+}
+
+// ─── Per-client privileges ───────────────────────────────────────────────────
+
+/// `admin_allowed` and `log_export_allowed` appear in the documented client
+/// registry and were read by nothing.
+#[tokio::test]
+async fn audit_reads_require_the_log_export_privilege() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut auditor = ClientPolicy::default_for("auditor");
+    auditor.log_export_allowed = true;
+    let ordinary = ClientPolicy::default_for("ordinary");
+    let registry = write_registry(dir.path(), &[auditor, ordinary]);
+
+    let mut config = test_config(dir.path(), "log-export");
+    config.client_registry_path = Some(registry);
+    let node = Arc::new(CordonNode::build(config).await.unwrap());
+    node.go_operational().unwrap();
+
+    node.client_may_read_audit_log(&client("auditor"))
+        .expect("an enrolled auditor should be permitted");
+
+    let err = node
+        .client_may_read_audit_log(&client("ordinary"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not permitted"), "unexpected: {}", err);
+}
+
+#[tokio::test]
+async fn admin_actions_require_the_admin_privilege() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut operator = ClientPolicy::default_for("operator");
+    operator.admin_allowed = true;
+    let ordinary = ClientPolicy::default_for("ordinary");
+    let registry = write_registry(dir.path(), &[operator, ordinary]);
+
+    let mut config = test_config(dir.path(), "admin-privilege");
+    config.client_registry_path = Some(registry);
+    let node = Arc::new(CordonNode::build(config).await.unwrap());
+    node.go_operational().unwrap();
+
+    node.client_may_administer(&client("operator")).unwrap();
+
+    let err = node
+        .client_may_administer(&client("ordinary"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not enrolled"), "unexpected: {}", err);
+}
+
+/// Before anyone is enrolled the node is not running an access-control regime,
+/// so privilege flags nobody could have been granted must not lock out the
+/// development path.
+#[tokio::test]
+async fn privilege_flags_do_not_apply_until_clients_are_enrolled() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = build_node(dir.path(), "no-registry").await;
+
+    node.client_may_administer(&client("anyone")).unwrap();
+    node.client_may_read_audit_log(&client("anyone")).unwrap();
+}
