@@ -282,6 +282,15 @@ fn check_posture(report: &mut Report, config: &CordonConfig) {
             "this node is not running inside an SEV-SNP guest, or the kernel predates \
              6.7 and does not expose configfs-tsm at /sys/kernel/config/tsm/report",
         ),
+        MeasurementSource::NitroEnclave => report.fail(
+            "measurements",
+            "configured for Nitro Enclaves, which Cordon cannot yet produce",
+            "Cordon verifies Nitro attestation documents but cannot obtain one — an \
+             enclave has no persistent storage for the audit log and no network \
+             interface for the API, both of which Cordon needs. The node will refuse \
+             to start. Use \"sev_snp\" for a confidential VM, or \"tpm2\" for an \
+             attested host",
+        ),
         MeasurementSource::SoftwareMeasurement => report.warn(
             "measurements",
             "derived from configuration, not hardware",
@@ -293,11 +302,12 @@ fn check_posture(report: &mut Report, config: &CordonConfig) {
     // A confidential VM is the only source that also makes the node's memory
     // private from whoever runs the host, so it is worth saying which side of
     // that line a deployment is on.
-    if config
-        .attestation
-        .measurement_source
-        .provides_memory_confidentiality()
-    {
+    //
+    // Nitro is excluded from the passing branch deliberately: the property is
+    // real, but Cordon cannot run inside an enclave, so reporting it as
+    // achieved would tell an operator they have something the node will refuse
+    // to start and deliver.
+    if config.attestation.measurement_source == MeasurementSource::SevSnp {
         report.pass(
             "memory confidentiality",
             "prompts and weights are inside the encrypted guest",

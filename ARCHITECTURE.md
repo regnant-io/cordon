@@ -18,7 +18,7 @@ and §6.1 explains the one mechanism that connects an attestation to an answer.
 
 | Crate | Responsibility |
 |---|---|
-| `cordon-crypto` | AES-256-GCM, Ed25519, HKDF-SHA256 key hierarchy, constant-time comparison, zeroizing secret types, a canonical encoding for values a verifier must reproduce, TPM 2.0 and AMD SEV-SNP structure parsing and verification, and the client-side attestation verifier. |
+| `cordon-crypto` | AES-256-GCM, Ed25519, HKDF-SHA256 key hierarchy, constant-time comparison, zeroizing secret types, a canonical encoding for values a verifier must reproduce, TPM 2.0, AMD SEV-SNP and AWS Nitro structure parsing and verification, a bounded CBOR reader for hostile attestation documents, X.509 chain walking to a pinned root, and the client-side attestation verifier. |
 | `cordon-audit` | Hash-chained, Ed25519-signed, append-only JSONL audit log, and an offline verifier. |
 | `cordon-core` | The node and every layer: configuration, state machine, identity, rate limiting, model store, inference engine, model runtimes, output filter, covert-channel detector, timing normalizer, attestation service, confidential-VM report acquisition, integrity monitor, attack detector, metrics, Hub client. |
 | `cordon-api` | Axum HTTP server, routes, handlers, middleware, TLS and mTLS termination, operator console. |
@@ -230,6 +230,31 @@ the kernel's `configfs-tsm` interface (Linux 6.7+) rather than an ioctl on
 `/dev/sev-guest`, which keeps `#![forbid(unsafe_code)]` intact and costs no
 dependency. **Not yet run against real silicon.**
 
+**AWS Nitro Enclaves — verification only.** The COSE_Sign1 envelope, the ES384
+signature over the RFC 8152 `Sig_structure`, the CBOR attestation document, the
+chain from the document's leaf certificate to a root the verifier pins, the
+PCRs, the challenge binding and a freshness bound. The CBOR reader is written
+for this purpose rather than taken from a crate: an attestation document is
+parsed before its signature can be checked, so it is the most hostile input
+Cordon accepts, and a reader that accepts one shape and refuses everything else
+is the right tool where a general decoder is the wrong one. It refuses
+indefinite-length items, checks declared lengths against the bytes actually
+present before allocating, bounds depth and item count, and refuses trailing
+bytes and duplicate keys.
+
+Cordon does **not** run inside a Nitro Enclave. An enclave reaches the Nitro
+Security Module by `ioctl` on `/dev/nsm`, has no persistent storage, and has no
+network interface but vsock — and §7's audit log is a file `fsync`ed before each
+request is processed, while the API is a TLS listener. Supporting it means
+redesigning both around vsock and an external log sink, not adding a binding. A
+node configured for `nitro_enclave` refuses to start.
+
+The chain walk both confidential-VM sources need lives in `x509_chain`, so the
+two cannot drift on what "chains to a pinned root" means. Neither ever
+terminates a chain on a certificate the evidence supplied: the root comes from
+the operator's configuration, and for Nitro the document's own copy of the root
+— which AWS places first in `cabundle` — is dropped before the walk.
+
 When a hardware measurement source is configured and the hardware is not
 reachable, the node **fails to start**. It does not fall back to a software
 measurement — a node that quietly downgrades is worse than one that refuses to
@@ -251,6 +276,8 @@ hardware attestation.
 
 - **Intel TDX and SGX-DCAP.** TDX is reachable through the same kernel interface
   as SEV-SNP; its report format is not yet parsed. SGX-DCAP is not implemented.
+- **Running inside a Nitro Enclave.** The verifier is complete; the environment
+  is the obstacle, as above.
 - **The AMD Key Distribution Service.** The VCEK request path is built; the fetch
   is left to the caller so an air-gapped node can verify from a cached chain.
 - **Revocation.** Neither AMD's CRL nor a TPM vendor's is consulted.
@@ -422,7 +449,7 @@ the firewall's job.
 
 | Adversary | Why |
 |---|---|
-| Root on the node, outside a confidential VM | Can read process memory. `measurement_source = "sev_snp"` is what closes this; a TPM does not. |
+| Root on the node, outside a confidential VM | Can read process memory. `measurement_source = "sev_snp"` is what closes this; a TPM does not, and `nitro_enclave` would but Cordon cannot run in one. |
 | An attacker holding the CMK | It is the root of trust by construction. |
 | Physical attacks on the host | Out of scope. SEV-SNP raises the cost considerably; it is not a claim of physical security. |
 | A malicious model | Cordon controls access to a model, not what the model says. |

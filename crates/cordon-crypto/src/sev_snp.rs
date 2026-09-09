@@ -430,79 +430,6 @@ pub fn vcek_public_point(vcek_der: &[u8]) -> CryptoResult<Vec<u8>> {
     Ok(point.to_vec())
 }
 
-/// Verify that `child` was signed by `parent`.
-///
-/// AMD signs the ASK and VCEK with RSA-4096 PSS and SHA-384, but the algorithm
-/// is dispatched from the certificate rather than assumed. Assuming it would
-/// mean a chain using anything else fails with "signature invalid", which reads
-/// as an attack when it is a mismatch — and would quietly rule out any root an
-/// operator might reasonably pin for a private deployment.
-fn verify_certificate_signature(child_der: &[u8], parent_der: &[u8]) -> CryptoResult<bool> {
-    use ring::signature;
-    use x509_parser::prelude::*;
-
-    let (_, child) = X509Certificate::from_der(child_der).map_err(|e| {
-        CryptoError::AttestationFailed(format!("certificate is not valid DER X.509: {}", e))
-    })?;
-    let (_, parent) = X509Certificate::from_der(parent_der).map_err(|e| {
-        CryptoError::AttestationFailed(format!("issuer is not valid DER X.509: {}", e))
-    })?;
-
-    // The issuer name must match before any cryptography is worth doing.
-    if child.issuer() != parent.subject() {
-        return Ok(false);
-    }
-
-    let signed = child.tbs_certificate.as_ref();
-    let signature = child.signature_value.data.as_ref();
-    let parent_key = parent.public_key().subject_public_key.data.as_ref();
-
-    // Dispatch on the algorithm the child certificate says it was signed with.
-    let algorithm = child.signature_algorithm.algorithm.to_id_string();
-    let verified = match algorithm.as_str() {
-        // RSASSA-PSS — what AMD uses.
-        "1.2.840.113549.1.1.10" => {
-            signature::UnparsedPublicKey::new(&signature::RSA_PSS_2048_8192_SHA384, parent_key)
-                .verify(signed, signature)
-                .is_ok()
-        }
-        // sha384WithRSAEncryption
-        "1.2.840.113549.1.1.12" => {
-            signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA384, parent_key)
-                .verify(signed, signature)
-                .is_ok()
-        }
-        // sha256WithRSAEncryption
-        "1.2.840.113549.1.1.11" => {
-            signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, parent_key)
-                .verify(signed, signature)
-                .is_ok()
-        }
-        // ecdsa-with-SHA384. X.509 carries ECDSA signatures ASN.1-encoded, not
-        // in the fixed-width form the report itself uses.
-        "1.2.840.10045.4.3.3" => {
-            signature::UnparsedPublicKey::new(&signature::ECDSA_P384_SHA384_ASN1, parent_key)
-                .verify(signed, signature)
-                .is_ok()
-        }
-        // ecdsa-with-SHA256
-        "1.2.840.10045.4.3.2" => {
-            signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, parent_key)
-                .verify(signed, signature)
-                .is_ok()
-        }
-        other => {
-            return Err(CryptoError::AttestationFailed(format!(
-                "certificate is signed with algorithm {}, which Cordon does not verify. \
-                 AMD's chain uses RSASSA-PSS with SHA-384.",
-                other
-            )));
-        }
-    };
-
-    Ok(verified)
-}
-
 /// Verify a SEV-SNP attestation report end to end.
 ///
 /// * `report_bytes` — the raw 1184-byte report.
@@ -547,7 +474,7 @@ pub fn verify_report(
         let mut child = vcek_der;
         let mut valid = true;
         for parent in chain_der {
-            if !verify_certificate_signature(child, parent)? {
+            if !crate::x509_chain::verify_signed_by(child, parent)? {
                 valid = false;
                 break;
             }
