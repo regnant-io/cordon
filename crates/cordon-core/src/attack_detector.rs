@@ -21,7 +21,7 @@
 //! which degrades detection rather than memory. And `cleanup`, which the node
 //! runs on a timer, now prunes every map rather than two of them.
 //!
-//! Within a window, [`WindowCounter`] stores one timestamp per event, so a
+//! Within a window, each counter stores one timestamp per event, so a
 //! counter is also capped: a burst beyond the cap is counted as the cap, which
 //! is above every threshold that matters anyway.
 

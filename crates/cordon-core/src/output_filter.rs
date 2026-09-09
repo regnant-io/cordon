@@ -422,7 +422,7 @@ const REFILTER_STRIDE_DIVISOR: usize = 64;
 /// 32,768-token ceiling `inference.max_output_tokens` allows, that is seconds
 /// of CPU spent re-reading the same text, per stream.
 ///
-/// So the re-scan is strided: it runs once every [`MIN_REFILTER_STRIDE_CHARS`]
+/// So the re-scan is strided: it runs once every sixteen
 /// characters at first, and progressively less often as the response grows.
 /// This costs nothing in safety. Release is computed only from a completed
 /// scan, so between scans nothing is released — the effect is that text is

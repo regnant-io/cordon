@@ -24,6 +24,7 @@ cordon run smollm2-360m-instruct-gguf
 
 - [What Cordon actually does](#what-cordon-actually-does)
 - [What is real, and what is not](#what-is-real-and-what-is-not)
+- [Where the trust lives](#where-the-trust-lives)
 - [Install](#install)
 - [Getting a model](#getting-a-model)
 - [Deployment modes](#deployment-modes)
@@ -63,7 +64,7 @@ A request arrives and passes through, in order:
 | **Audit pre-write** | The request is logged *before* it is processed. A failed write refuses the request. |
 | **Generate** | The model runtime produces output. |
 | **Settle** | Unused output-token reservation is refunded. |
-| **Output filter** | Policy rules redact, truncate, or block. |
+| **Output filter** | The policy enrolled *for this client* redacts, truncates, or blocks. |
 | **Covert channel** | Statistical analysis of the text about to be released. |
 | **Timing** | Latency is normalised to a bucket or floor. |
 | **Audit post-write** | The completed record, with the true policy and covert-channel values. |
@@ -74,12 +75,21 @@ filter incrementally with a trailing holdback, so a pattern that only completes
 in a later chunk — a card number whose last digits arrive next — is caught
 before any part of it has left the node.
 
+Streaming is refused while `side_channel.timing_normalization` is enabled. A
+stream releases text as it is produced, so the intervals between chunks carry
+exactly the per-token timing normalisation exists to remove; serving one under
+that setting would be serving a guarantee the transport cannot keep. Use
+`POST /v1/inference`, which is normalised.
+
 ---
 
 ## What is real, and what is not
 
-Cordon is a control plane, not a trusted execution environment. Being precise
-about that line is the point of this section.
+Cordon is a control plane. On an ordinary host it is *only* a control plane, and
+being precise about that line is the point of this section. Run it inside a
+confidential VM and the line moves — see [Where the trust
+lives](#where-the-trust-lives) below, which is the honest answer to "is this a
+TEE?".
 
 ### Real, and exercised by the test suite
 
@@ -91,45 +101,136 @@ about that line is the point of this section.
 - **Ed25519** signatures over inference responses, attestation reports, audit
   entries, and audit anchors.
 - **A hash-chained, signed, append-only audit log** with an offline verifier.
-  Rewriting an entry breaks the chain, and `cordon-verify-log` detects it
-  without contacting the node.
+  Rewriting, deleting, or renumbering an entry breaks the chain, and
+  `cordon-verify-log` detects it without contacting the node.
+- **Attestation reports a client can verify independently.** A report carries
+  the structure the platform signed, the key that signed it, and the node's
+  response-signing key, all bound to a nonce the *client* chose. Replay,
+  substituted measurements, a substituted attestation key, and a substituted
+  signing key are each rejected.
 - **TLS 1.3 and mutual TLS**, with client identity parsed from the verified
   certificate's subject — not from a header.
-- **A supervised model runtime** on loopback with an ephemeral port, a per-boot
-  API key, and a startup check that refuses to run if the runtime serves a web UI.
+- **Per-client content policy.** Redaction, truncation, blocking, PII
+  categories and topic keywords, compiled at startup and applied per client on
+  both the unary and the streaming path.
+- **A supervised model runtime** on loopback with an ephemeral port, an API key
+  passed by file rather than on a command line, and a startup check that refuses
+  to run if the runtime serves a web UI.
 
 ### Real, but hardware-dependent
 
-- **TPM 2.0 measurements.** PCR values and signed quotes come from `tpm2-tools`.
-  The command wiring and parsing are unit-tested; this repository's CI has no
-  TPM, so verify it on your own hardware with `cordon doctor`.
+- **TPM 2.0 measurements and quotes,** through `tpm2-tools`. A report carries
+  the `TPMS_ATTEST` structure the TPM signed, so a verifier can check the
+  signature, confirm the quote answers their challenge, and confirm the PCR
+  values shown are the ones the TPM signed for. The parsing and verification are
+  unit-tested against real signatures; this repository's CI has no TPM, so
+  confirm the acquisition path on your own hardware with `cordon doctor`.
 
-### Not a hardware root of trust
+- **AMD SEV-SNP attestation.** Report parsing, signature verification, and the
+  VCEK certificate chain are implemented against AMD's specification and tested
+  with synthetic keys — real signatures over genuinely formatted structures,
+  with every refusal path covered. **They have not been run against real
+  silicon.** Treat that exactly as you treat the TPM path.
 
-- **`measurement_source = "software_measurement"`** derives measurements from
-  Cordon's build and configuration. It attests that the node is running the
-  configuration you expect. It attests **nothing** about the platform underneath
-  it, and an attacker with code execution on the host can reproduce it exactly.
-  It is confined to Light mode, and every response says which source produced it.
+### Not implemented
 
-- **Full SGX-DCAP and SEV-SNP quote verification** are not implemented. The TEE
-  quote in a report carries measurements and a type; it does not carry a
-  hardware-signed attestation Cordon verifies against Intel's or AMD's roots.
+- **Full SGX-DCAP quote verification.** Intel TDX is reachable through the same
+  kernel interface Cordon uses for SEV-SNP, and its report format is not yet
+  parsed.
+- **Fetching the VCEK from AMD's Key Distribution Service.** The request path is
+  built; the fetch is left to the caller so an air-gapped node can verify from a
+  cached chain.
+- **Certificate revocation.** Neither AMD's CRL nor a TPM vendor's is consulted.
+- **Binding a TPM attestation key to genuine hardware.** Cordon carries the
+  endorsement key certificate and does not walk it to a vendor root, so a
+  verified TPM quote proves the holder of that key produced it — not that the
+  key belongs to a real TPM. SEV-SNP *does* chain to a root you pin.
+- **HSM integration.** Cordon talks to no HSM. The Client Master Key arrives
+  through `CORDON_CMK_FILE`; where that file comes from is your arrangement.
+  `hsm.fips_level` is a declaration Cordon does not verify.
 
 ### Deliberate, bounded weaknesses
 
 - **Staged plaintext weights touch disk.** An encrypted bundle is decrypted to a
-  mode-0600 file, the runtime loads it with memory mapping disabled, and the
-  file is erased immediately. The window is bounded and documented; it is not
-  zero. Set `model_store.staging_dir` to a `tmpfs` mount where that matters.
+  file created with `O_EXCL` and `O_NOFOLLOW` at mode 0600 in a 0700 directory,
+  the runtime loads it with memory mapping disabled, and the file is erased
+  immediately. The window is bounded and documented; it is not zero. Set
+  `model_store.staging_dir` to a `tmpfs` mount where that matters.
 
-- **Prompts live in process memory.** Buffers zeroize on drop, but an attacker
-  with root on the node can read them before that. Cordon narrows the window; a
-  real TEE is what closes it.
+- **Prompts live in process memory.** Buffers zeroize on drop, but on an
+  ordinary host an attacker with root can read them first. This is the one a
+  confidential VM closes, and nothing else does.
+
+- **Response length is not padded.** Timing is normalised; size is not.
 
 Everything above is stated the same way in `ARCHITECTURE.md` §6 and in the
 `SECURITY.md` threat model. If you find a place where the code claims more than
 this, that is a bug — please report it.
+
+---
+
+## Where the trust lives
+
+Three measurement sources, and the difference between them is the whole
+subject. Choose with `attestation.measurement_source`.
+
+| | `software_measurement` | `tpm2` | `sev_snp` |
+|---|---|---|---|
+| Attests the configuration Cordon runs | yes | yes | yes |
+| Attests how the machine booted | no | yes | yes |
+| Signed by hardware you can check | no | yes | yes |
+| Chains to a vendor root you pinned | no | not yet | yes |
+| **Host root cannot read prompts** | **no** | **no** | **yes** |
+| Permitted outside Light mode | no | yes | yes |
+
+The last row is the one that matters. A TPM tells you a machine booted software
+you expect; it does not stop whoever owns that machine from reading the memory
+of what is running on it. Under SEV-SNP, Cordon, the model runtime, the weights
+and the prompts are all inside an encrypted guest and the hypervisor is outside
+it — so "the operator cannot read your prompts" stops being an aspiration.
+
+Whichever source you use, the platform's signature commits to a digest over
+**both** the client's nonce and the node's response-signing key:
+
+```text
+report_data / extraData = SHA-256("CORDON_ATTEST_CHALLENGE_v1"
+                                  || len(key) || signing_key_hex
+                                  || len(nonce) || nonce)
+```
+
+That binding is what connects an attestation to an answer. Without it a quote
+proves something about a machine, a response signature proves something about a
+key, and nothing joins the two. Recompute it from
+`report.combined.tee_quote.enclave_signing_key_hex` and the nonce you sent, and
+check it against the quote.
+
+### Running under SEV-SNP
+
+```toml
+[attestation]
+measurement_source = "sev_snp"
+halt_until_verified = true
+
+[attestation.expected]
+# The guest launch measurement, from `cordon attest --pin`.
+mrenclave = "…96 hex characters…"
+
+[attestation.expected.sev_snp]
+# AMD's root, base64 DER. Pinned by you: a chain that ships its own root
+# proves only that it is internally consistent.
+amd_root_der_b64 = "…"
+# Refuse a platform below the patch level you have reviewed.
+min_bootloader_svn = 4
+min_snp_svn        = 20
+min_microcode_svn  = 210
+# A debuggable guest's memory is readable by the hypervisor.
+refuse_debuggable_guest = true
+```
+
+Cordon reads the report through the kernel's `configfs-tsm` interface (Linux
+6.7+), so it needs no ioctl and keeps `#![forbid(unsafe_code)]`. A node
+configured this way refuses to start if it is not in a confidential VM, if the
+guest was launched debuggable, or if no AMD root is pinned.
 
 ---
 
@@ -218,13 +319,19 @@ Five modes, from a laptop to an air-gapped rack. Each mode's invariants are
 enforced at startup: a configuration that cannot deliver its mode's guarantees
 is refused rather than degraded.
 
-| Mode | TEE | mTLS | Console | Internet | Runtime |
+| Mode | Measurements | mTLS | Console | Egress | Runtime |
 |---|---|---|---|---|---|
-| `light` | not required | optional | allowed, loopback | yes | any |
-| `sovereign_cloud` | required | required | refused | yes | local |
-| `vault` | required | required | refused | no | local |
-| `island` | required | required | refused | no | local |
-| `dark` | required | required | refused | no | local |
+| `light` | any | optional | allowed, loopback | permitted | any |
+| `sovereign_cloud` | `sev_snp` or `tpm2` | required | refused | permitted | local |
+| `vault` | `sev_snp` or `tpm2` | required | refused | refused | local |
+| `island` | `sev_snp` or `tpm2` | required | refused | refused | local |
+| `dark` | `sev_snp` or `tpm2` | required | refused | refused | local |
+
+Every mode above Light requires pinned measurements, a Client Master Key, and
+`network.outbound_policy = "zero_egress"` where the table says egress is
+refused. Which measurement source you choose decides whether the deployment can
+also claim the operator cannot read prompts — see
+[Where the trust lives](#where-the-trust-lives).
 
 ### Light — development
 
@@ -287,7 +394,8 @@ cat > /etc/cordon/clients.json <<'JSON'
     "admin_allowed": false,
     "log_export_allowed": true,
     "policy_expires_at": null,
-    "cert_pins": []
+    "cert_pins": [],
+    "content_policy_path": "/etc/cordon/policies/analytics.json"
   }
 ]
 JSON
@@ -301,7 +409,23 @@ CORDON_CMK_FILE=/run/cordon/cmk \
 ```
 
 Once `clients.json` enrols anyone, unenrolled clients are **denied**. Enrolling
-is taken as intent to restrict.
+is taken as intent to restrict, and the per-client privileges begin to apply
+with it:
+
+- `admin_allowed` — may carry an admin signature. The signature proves the
+  operator authorized a command; this decides which clients may present one.
+  Both apply.
+- `log_export_allowed` — may read the audit log. The log records which clients
+  asked for what and how often, which is exactly the traffic analysis one tenant
+  should not be able to run against another, so reading it is a privilege rather
+  than a consequence of being enrolled. Reads are themselves recorded.
+- `content_policy_path` — the output policy applied to this client. Absent means
+  the node's `content_policy.default_path`, and absent that, a built-in rule
+  that flags PII and alters nothing.
+
+Before anyone is enrolled none of these apply: a deployment that has enrolled
+nobody is not running an access-control regime, and refusing a privilege nobody
+could have been granted would only break the development path.
 
 ### Vault — regulated enterprise
 
@@ -330,8 +454,18 @@ halt_until_verified = true
 ```
 
 `halt_until_verified` is the strong setting: a client is refused inference until
-*it* has verified the node's attestation. Verification is per client — one
-caller's acceptance does not unlock the node for anyone else.
+it has attested the node. Verification is per client — one caller's acceptance
+does not unlock the node for anyone else.
+
+Be precise about what that gate is. `POST /v1/attestation/verify` has the *node*
+check its report against its own pinned configuration and record that the
+calling client has attested it; the client contributes a nonce. It proves the
+node is in the state its operator pinned, at a moment the client chose. A client
+that wants its own answer fetches `GET /v1/attestation?nonce=…` and verifies the
+report itself — everything needed for that is in the report.
+
+With timing normalisation on, `POST /v1/inference/stream` is refused. See
+[What Cordon actually does](#what-cordon-actually-does).
 
 ### Island — private network
 
@@ -347,21 +481,28 @@ fixed_floor_ms = 500
 
 ### Dark — air-gapped
 
-Maximum restriction: a FIPS 140-2 Level 4 HSM, single tenant, no network beyond
-the client subnet.
+Maximum restriction: single tenant, no network beyond the client subnet, and key
+custody at FIPS 140-2 Level 4.
 
 ```toml
 mode = "dark"
 
+[network]
+outbound_policy = "zero_egress"
+
 [hsm]
-provider = "thales_luna"
+# A declaration, not an integration. Cordon talks to no HSM — the Client Master
+# Key reaches it through CORDON_CMK_FILE, and where that file comes from is
+# your arrangement. This value is used only to refuse a Dark configuration that
+# contradicts its own mode.
 fips_level = 4
 
 [inference]
 multi_tenant = false
 ```
 
-Startup refuses a Dark configuration with a weaker HSM or multi-tenancy enabled.
+Startup refuses a Dark configuration that declares a weaker level, enables
+multi-tenancy, or permits egress.
 
 ---
 
@@ -529,17 +670,17 @@ control, and any later rewrite of the log before that point becomes detectable.
 | `GET /v1/health/runtime` | client | Recent model-runtime output. |
 | `POST /v1/inference` | client | Generate. Ed25519-signed response. |
 | `POST /v1/inference/stream` | client | Generate over SSE, filtered incrementally. |
-| `GET /v1/attestation` | client | A signed measurement report. |
-| `POST /v1/attestation/verify` | client | Check a report against pinned measurements. |
+| `GET /v1/attestation?nonce=` | client | A report bound to your challenge, and everything needed to verify it yourself. |
+| `POST /v1/attestation/verify` | client | Have the node check its own report and record that you attested it. |
 | `GET /v1/models` | client | Registered bundles and their integrity state. |
-| `POST /v1/models` | K_admin | Register a bundle present in the model store. |
-| `GET /v1/audit/verify` | client | Recompute and check the whole chain. |
-| `GET /v1/audit/tail` | client | The most recent entries. |
-| `GET /v1/audit/anchor` | client | Signed chain head. |
-| `POST /v1/admin/quarantine` | K_admin | Stop serving until recovered. |
-| `POST /v1/admin/recover` | K_admin | Resume. Refused while any bundle fails integrity. |
-| `POST /v1/admin/teardown` | K_admin | Zeroize key material and stop. |
-| `POST /v1/admin/suspend-client` | K_admin | Suspend one client. |
+| `POST /v1/models` | K_admin + `admin_allowed` | Register a bundle present in the model store. |
+| `GET /v1/audit/verify` | `log_export_allowed` | Recompute and check the whole chain. |
+| `GET /v1/audit/tail` | `log_export_allowed` | The most recent entries. |
+| `GET /v1/audit/anchor` | `log_export_allowed` | Signed chain head. |
+| `POST /v1/admin/quarantine` | K_admin + `admin_allowed` | Stop serving until recovered. |
+| `POST /v1/admin/recover` | K_admin + `admin_allowed` | Resume. Refused while any bundle fails integrity. |
+| `POST /v1/admin/teardown` | K_admin + `admin_allowed` | Zeroize key material and stop. |
+| `POST /v1/admin/suspend-client` | K_admin + `admin_allowed` | Suspend one client. |
 | `GET /metrics` | loopback | Prometheus. Refused from any non-local peer. |
 
 ### Streaming
@@ -553,23 +694,58 @@ event: error   data: {error, message}
 The stream always terminates with `done` or `error`, so a client never has to
 infer completion from a silent socket.
 
-### Attestation verification
+Refused while timing normalisation is enabled — see
+[What Cordon actually does](#what-cordon-actually-does).
 
-`POST /v1/attestation/verify` takes **only a nonce**. Expected measurements are
-pinned by the operator in configuration and cannot be supplied by the caller —
-a node that verifies against caller-supplied values can always be made to
-verify, since anyone can read its measurements from `GET /v1/attestation` and
-hand them straight back.
+### Attestation
 
-A node with nothing pinned returns `verified: false` and says why. Capture and
-pin its measurements with `cordon attest --pin`.
+There are two ways to use these, and they are not equivalent.
+
+**`POST /v1/attestation/verify`** takes only a nonce. Expected measurements are
+pinned by the operator and cannot be supplied by the caller — a node that
+verifies against caller-supplied values can always be made to verify, since
+anyone can read its measurements from `GET /v1/attestation` and hand them
+straight back. The response reports `platform_quote`, `binds_signing_key` and
+`hardware_rooted` separately, so "the configuration matched" is never mistaken
+for "a platform signed for it". A node with nothing pinned returns
+`verified: false` and says why.
+
+But note who is doing the checking: the node is, against its own configuration.
+That is a useful gate and it is not evidence for you.
+
+**`GET /v1/attestation?nonce=<yours>`** is what a client uses to reach its own
+conclusion. The report carries the structure the platform signed, the key that
+signed it, and the node's response-signing key. Verify it against measurements
+*you* pinned:
+
+```rust
+use cordon_crypto::attestation::AttestationReport;
+
+let established = report.verify(&my_pinned_measurements, &my_nonce)?;
+assert!(established.is_hardware_rooted());
+```
+
+`is_hardware_rooted()` is true only when a platform quote verified *and* it
+committed to the key that signs this node's responses. Anything less is worth
+having and is not that.
 
 ---
 
 ## The operator console
 
-A single page: node posture, a chat console that exercises the real pipeline,
-and an endpoint reference.
+A single page, five panels: node posture, an attestation challenger, the audit
+chain, a chat console that exercises the real pipeline, and an endpoint
+reference.
+
+The attestation panel issues a fresh nonce, asks for a report bound to it, and
+reports what that report does and does not establish as four separate facts
+rather than one light — then renders the `[attestation.expected]` block ready to
+paste. The audit panel shows the chain head, tails recent entries, verifies the
+whole chain, and takes an anchor.
+
+Both are the API's own handlers mounted on the console's listener, not a second
+implementation, so the console cannot show you something a client would not
+receive — and its audit reads are recorded like anyone's.
 
 ```bash
 cordon run <model>              # console at http://127.0.0.1:8478
@@ -606,7 +782,8 @@ parallel_slots = 8              # raised to max_concurrent_requests if lower
 startup_timeout_seconds = 180
 
 [attestation]
-measurement_source = "tpm2"     # tpm2 | software_measurement (Light only)
+# sev_snp | tpm2 | software_measurement (Light only)
+measurement_source = "tpm2"
 halt_until_verified = true
 interval_hours = 24
 
@@ -618,6 +795,27 @@ min_isv_svn = 0
 [attestation.expected.pcr_values]
 0 = "sha256:…"
 4 = "sha256:…"
+
+[attestation.expected.sev_snp]  # required when measurement_source = "sev_snp"
+amd_root_der_b64        = "…"   # AMD's root, pinned by you
+min_bootloader_svn      = 4
+min_snp_svn             = 20
+min_microcode_svn       = 210
+refuse_debuggable_guest = true
+
+[content_policy]
+# A JSON policy applied to every client that does not name its own. A client
+# overrides it with `content_policy_path` in the registry. Compiled at startup,
+# so a rule that does not parse stops the node rather than failing the request
+# it was meant to filter.
+default_path = "/etc/cordon/policy.json"
+
+[network]
+# zero_egress | restricted. Under zero_egress Cordon opens no outbound
+# connections: model downloads are disabled and a non-loopback runtime endpoint
+# is refused. It does not stop packets leaving the host — that is a firewall's
+# job. Required in Vault, Island and Dark.
+outbound_policy = "zero_egress"
 
 [limits]
 max_request_bytes = 1048576
@@ -642,6 +840,19 @@ on the serving path. A bundle whose last check is older than that is withdrawn
 from service until the monitor confirms it again — so a monitor that has stopped
 running takes the node out of service rather than leaving it serving unverified
 weights.
+
+### A note on what is not here
+
+Configuration that Cordon does not act on has been removed rather than left to
+imply a defence. Gone in this version: `inbound_whitelist`, `hardware_firewall`,
+`smartnic_acl`, `mgmt_channel`, `constant_time_enforcement`,
+`memory_zeroize_on_completion`, `response_size_padding`,
+`re_attestation_interval_hours`, `halt_on_attestation_failure`,
+`cache_partitioning`, `boot.pcr_policy`, `client_kv_cache_isolation`,
+`max_input_tokens`, `audit.log_format`, `audit.export_method`,
+`audit.retention_days`, `signing_key_from_enclave`, the whole `[updates]`
+section, and the HSM provider, slot and PIN fields. Unknown keys are ignored, so
+an existing file still loads; it simply no longer describes anything.
 
 ---
 
@@ -692,6 +903,26 @@ files are readable.
 **`this node has no pinned expected measurements`** — attestation verification
 has nothing to check against. Run `cordon attest --pin >> cordon.toml`, review
 the values, and restart.
+
+**`another Cordon node is already writing to the audit log`** — two nodes
+pointed at one audit directory fork the hash chain, and the log then fails
+verification as though it had been tampered with, so the second is refused. Give
+this node its own directory. If none is running, the previous one did not shut
+down cleanly: verify the chain with `cordon-verify-log`, then delete
+`.cordon-writer.lock`.
+
+**`streaming is refused while side_channel.timing_normalization is enabled`** —
+correct. Use `POST /v1/inference`, which is normalised.
+
+**`this node is not running inside a confidential VM`** — `measurement_source =
+"sev_snp"` needs an SEV-SNP guest and a kernel exposing `configfs-tsm` (Linux
+6.7+). Cordon will not substitute a weaker measurement for one it was told to
+produce.
+
+**`--bind <addr> is not a loopback address`** — `cordon run` serves plain HTTP
+with header-derived identity, so a routable bind publishes an unauthenticated
+inference endpoint. Use `cordon serve` with mTLS, forward the port over SSH, or
+pass `--insecure-bind` if you understand the exposure.
 
 **`--no-tls is refused in <mode> mode`** — correct. Client identity would come
 from a header any caller can set. Provision certificates.
