@@ -55,7 +55,8 @@ use crate::config::{CordonConfig, MeasurementSource, TeePreference};
 use crate::error::{CordonError, CordonResult};
 use cordon_crypto::attestation::{
     attestation_challenge, compute_combined_hash, AttestationReport, CombinedAttestation,
-    ExpectedMeasurements, TeeQuote, TeeType, TpmPcrSet, TpmQuote, VerifiedAttestation,
+    ExpectedMeasurements, PlatformEvidence, SevSnpPins, TeeQuote, TeeType, TpmPcrSet, TpmQuote,
+    VerifiedAttestation,
 };
 
 /// PCR register allocations.
@@ -139,6 +140,15 @@ impl AttestationService {
     fn take_measurements(&self) -> CordonResult<()> {
         let measurements = match self.config.attestation.measurement_source {
             MeasurementSource::Tpm2 => self.read_tpm_measurements()?,
+            MeasurementSource::SevSnp => {
+                // A confidential VM's measurement is the guest launch digest
+                // inside its attestation report, not a set of PCRs. Confirm the
+                // interface exists at startup so a node cannot come up claiming
+                // hardware attestation it will only fail to produce on the first
+                // request.
+                self.probe_confidential_vm()?;
+                BTreeMap::new()
+            }
             MeasurementSource::SoftwareMeasurement => {
                 tracing::warn!(
                     "Attestation measurements are derived from configuration, not from \
@@ -150,18 +160,77 @@ impl AttestationService {
         };
         *self.measurements.write() = measurements;
 
-        let version = env!("CARGO_PKG_VERSION");
-        let mut hasher = Sha256::new();
-        hasher.update(b"CORDON_ENCLAVE_v2");
-        hasher.update(version.as_bytes());
-        hasher.update(self.config.node_id.as_bytes());
-        *self.mrenclave.write() = hex::encode(hasher.finalize());
+        // On a confidential VM the launch measurement is the enclave
+        // measurement, and it comes from the platform rather than from
+        // anything Cordon computes. It is filled in when the first report is
+        // produced; until then there is nothing honest to put here.
+        if self.config.attestation.measurement_source != MeasurementSource::SevSnp {
+            let version = env!("CARGO_PKG_VERSION");
+            let mut hasher = Sha256::new();
+            hasher.update(b"CORDON_ENCLAVE_v2");
+            hasher.update(version.as_bytes());
+            hasher.update(self.config.node_id.as_bytes());
+            *self.mrenclave.write() = hex::encode(hasher.finalize());
+        }
 
         let mut hasher = Sha256::new();
         hasher.update(b"CORDON_SIGNER_v2");
         hasher.update(self.config.node_id.as_bytes());
         *self.mrsigner.write() = hex::encode(hasher.finalize());
 
+        Ok(())
+    }
+
+    /// Confirm a confidential-VM report interface is present and answering.
+    ///
+    /// Fails closed for the same reason the TPM path does: a node told to
+    /// produce hardware attestation and unable to must refuse to start, not
+    /// start and refuse each request. Operators read the stronger claim from
+    /// the configuration either way.
+    fn probe_confidential_vm(&self) -> CordonResult<()> {
+        if !crate::confidential_vm::is_available() {
+            return Err(CordonError::AttestationInvalid(format!(
+                "attestation.measurement_source is \"sev_snp\" but this node is not \
+                 running inside a confidential VM, or the kernel does not expose \
+                 configfs-tsm (Linux 6.7+). Cordon will not fall back to a weaker \
+                 measurement in {} mode. Deploy on an SEV-SNP guest, or change the \
+                 measurement source.",
+                self.config.mode
+            )));
+        }
+
+        // A probe report with a placeholder challenge, so a broken interface
+        // surfaces at startup rather than on a client's first request.
+        let probe = crate::confidential_vm::request_report(&[0u8; 32]).map_err(|e| {
+            CordonError::AttestationInvalid(format!(
+                "the confidential-VM report interface is present but did not produce a \
+                 report: {}",
+                e
+            ))
+        })?;
+
+        let report = cordon_crypto::sev_snp::SevSnpReport::parse(&probe.report).map_err(|e| {
+            CordonError::AttestationInvalid(format!(
+                "the platform returned a report Cordon cannot parse: {}",
+                e
+            ))
+        })?;
+
+        if report.policy.debug_allowed {
+            return Err(CordonError::AttestationInvalid(
+                "this guest was launched with a policy that permits debugging, which \
+                 lets the hypervisor read its memory. That defeats the confidentiality \
+                 the deployment mode claims. Relaunch with debugging disabled."
+                    .into(),
+            ));
+        }
+
+        *self.mrenclave.write() = report.measurement_hex();
+        tracing::info!(
+            platform = probe.platform.as_str(),
+            measurement = %report.measurement_hex(),
+            "Confidential-VM attestation available; guest launch measurement recorded"
+        );
         Ok(())
     }
 
@@ -322,6 +391,11 @@ impl AttestationService {
                         )));
                     }
                 },
+                // A confidential VM's evidence is its own attestation report,
+                // carried in `platform_evidence` below. There is no TPM quote.
+                MeasurementSource::SevSnp => {
+                    (String::new(), String::new(), String::new(), Vec::new())
+                }
                 MeasurementSource::SoftwareMeasurement => (
                     String::new(),
                     String::new(),
@@ -339,6 +413,16 @@ impl AttestationService {
             nonce: client_nonce.to_string(),
             timestamp: now,
             ek_cert_chain,
+        };
+
+        // The confidential-VM report, when this is one. Requested fresh for
+        // every attestation so it commits to this caller's challenge.
+        let (platform_evidence, mrenclave) = match source {
+            MeasurementSource::SevSnp => {
+                let evidence = self.request_sev_snp_evidence(&challenge)?;
+                (evidence.0, evidence.1)
+            }
+            _ => (PlatformEvidence::None, mrenclave),
         };
 
         let tee_type = match self.config.tee.preferred {
@@ -362,13 +446,14 @@ impl AttestationService {
             enclave_signing_key_hex: enclave_signing_key_hex.to_string(),
         };
 
-        let combined_hash = compute_combined_hash(&tpm_quote, &tee_quote)
+        let combined_hash = compute_combined_hash(&tpm_quote, &tee_quote, &platform_evidence)
             .map_err(|e| CordonError::Internal(e.to_string()))?;
 
         let report = AttestationReport {
             combined: CombinedAttestation {
                 tpm_quote,
                 tee_quote,
+                platform_evidence,
                 combined_hash,
                 node_id: node_id.to_string(),
                 cordon_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -379,6 +464,56 @@ impl AttestationService {
 
         *self.last_attestation.lock() = Some(now);
         Ok(report)
+    }
+
+    /// Ask the platform for a report committing to `challenge`, and package it
+    /// with whatever certificates it cached.
+    ///
+    /// Returns the evidence and the guest launch measurement, which is the
+    /// value an operator pins for a confidential VM.
+    fn request_sev_snp_evidence(
+        &self,
+        challenge: &[u8],
+    ) -> CordonResult<(PlatformEvidence, String)> {
+        let hardware = crate::confidential_vm::request_report(challenge)?;
+        let parsed = cordon_crypto::sev_snp::SevSnpReport::parse(&hardware.report)
+            .map_err(|e| CordonError::AttestationInvalid(e.to_string()))?;
+
+        let measurement = parsed.measurement_hex();
+        // Keep the service's view current: the launch measurement is what the
+        // health endpoints and the pin block report.
+        *self.mrenclave.write() = measurement.clone();
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let cached = crate::confidential_vm::parse_certificate_table(&hardware.certificates);
+
+        // The ARK is deliberately not forwarded even when the host cached one.
+        // A verifier must pin its own root; a chain that ships its own root
+        // proves only that it is internally consistent.
+        let chain: Vec<String> = cached.ask.iter().map(|der| b64.encode(der)).collect();
+
+        if cached.vcek.is_none() {
+            tracing::warn!(
+                "The host cached no VCEK for this guest, so the report cannot be \
+                 verified without one supplied out of band. Provision the host's \
+                 certificate cache, or fetch the VCEK from AMD's Key Distribution \
+                 Service at {}",
+                parsed.vcek_kds_path("Milan")
+            );
+        }
+
+        Ok((
+            PlatformEvidence::SevSnp {
+                report_b64: b64.encode(&hardware.report),
+                vcek_der_b64: cached
+                    .vcek
+                    .as_ref()
+                    .map(|der| b64.encode(der))
+                    .unwrap_or_default(),
+                certificate_chain_b64: chain,
+            },
+            measurement,
+        ))
     }
 
     /// The measurements this node checks a report against, as pinned by the
@@ -406,6 +541,15 @@ impl AttestationService {
                 TeePreference::ArmTrustZone => TeeType::ArmTrustZone,
                 TeePreference::Simulation => TeeType::Simulation,
             },
+            sev_snp: pinned.sev_snp.as_ref().map(|snp| SevSnpPins {
+                amd_root_der_b64: snp.amd_root_der_b64.clone(),
+                min_bootloader_svn: snp.min_bootloader_svn,
+                min_tee_svn: snp.min_tee_svn,
+                min_snp_svn: snp.min_snp_svn,
+                min_microcode_svn: snp.min_microcode_svn,
+                refuse_debuggable_guest: snp.refuse_debuggable_guest,
+                expected_vmpl: snp.expected_vmpl,
+            }),
         })
     }
 
@@ -637,6 +781,7 @@ mod tests {
             mrenclave: Some(probe.mrenclave()),
             mrsigner: Some(probe.mrsigner()),
             min_isv_svn: 0,
+            sev_snp: None,
         });
         let service = AttestationService::new(config).unwrap();
 
@@ -674,6 +819,7 @@ mod tests {
             mrenclave: Some(probe.mrenclave()),
             mrsigner: Some(probe.mrsigner()),
             min_isv_svn: 0,
+            sev_snp: None,
         });
         let service = AttestationService::new(config).unwrap();
 

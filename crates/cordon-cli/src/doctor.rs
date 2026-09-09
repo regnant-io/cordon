@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use cordon_core::{
+    confidential_vm,
     config::{CordonConfig, DeploymentMode, MeasurementSource, RuntimeBackend},
     hub,
     runtime::discover_llama_server,
@@ -271,12 +272,60 @@ fn check_posture(report: &mut Report, config: &CordonConfig) {
             "Cordon will not fall back to a software measurement — connect a TPM, or \
              switch to Light mode",
         ),
+        MeasurementSource::SevSnp if confidential_vm::is_available() => report.pass(
+            "measurements",
+            "read from a confidential VM's attestation report",
+        ),
+        MeasurementSource::SevSnp => report.fail(
+            "measurements",
+            "configured for SEV-SNP but no confidential-VM report interface is present",
+            "this node is not running inside an SEV-SNP guest, or the kernel predates \
+             6.7 and does not expose configfs-tsm at /sys/kernel/config/tsm/report",
+        ),
         MeasurementSource::SoftwareMeasurement => report.warn(
             "measurements",
             "derived from configuration, not hardware",
             "this attests the software Cordon is running and nothing about the \
              platform underneath it",
         ),
+    }
+
+    // A confidential VM is the only source that also makes the node's memory
+    // private from whoever runs the host, so it is worth saying which side of
+    // that line a deployment is on.
+    if config
+        .attestation
+        .measurement_source
+        .provides_memory_confidentiality()
+    {
+        report.pass(
+            "memory confidentiality",
+            "prompts and weights are inside the encrypted guest",
+        );
+    } else if !is_light {
+        report.warn(
+            "memory confidentiality",
+            "not provided by this measurement source",
+            "root on the host can read prompts and completions from process memory; \
+             only a confidential VM (measurement_source = \"sev_snp\") closes this",
+        );
+    }
+
+    if config.attestation.measurement_source == MeasurementSource::SevSnp
+        && config
+            .attestation
+            .expected
+            .as_ref()
+            .and_then(|e| e.sev_snp.as_ref())
+            .map(|snp| snp.amd_root_der_b64.trim().is_empty())
+            .unwrap_or(true)
+    {
+        report.fail(
+            "AMD root certificate",
+            "not pinned",
+            "pin AMD's root under [attestation.expected.sev_snp]; without it the chip's \
+             endorsement key chains to nothing",
+        );
     }
 
     if config

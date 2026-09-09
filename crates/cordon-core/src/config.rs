@@ -561,11 +561,30 @@ impl Default for UiConfig {
 }
 
 /// Where the platform measurements in an attestation report come from.
+///
+/// These are not interchangeable, and the differences are the whole subject.
+/// A software measurement describes what Cordon was configured to run. A TPM
+/// describes how the machine booted — but the operator still owns the machine
+/// afterwards and can read its memory. A confidential VM describes a running
+/// guest whose memory the operator *cannot* read, which is the only one of the
+/// three that closes the gap between "a control plane" and "a trusted execution
+/// environment".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeasurementSource {
     /// PCR values read from a TPM 2.0 device via `tpm2-tools`.
+    ///
+    /// Attests the boot chain. It does not make the node's memory private from
+    /// the host, so root on the host still reads prompts and completions.
     Tpm2,
+    /// An AMD SEV-SNP attestation report, read through the kernel's
+    /// `configfs-tsm` interface.
+    ///
+    /// Cordon, the model runtime, the weights, and the prompts are all inside
+    /// the encrypted guest; the hypervisor is outside it. This is the source
+    /// that lets a deployment claim confidentiality against the operator rather
+    /// than merely against the network.
+    SevSnp,
     /// A digest of the running configuration and build. This is a **software
     /// integrity measurement**, not a hardware root of trust: it attests that
     /// the node's configuration is what the operator expects, and nothing about
@@ -573,10 +592,28 @@ pub enum MeasurementSource {
     SoftwareMeasurement,
 }
 
+impl MeasurementSource {
+    /// Whether this source rests on hardware the operator cannot forge.
+    pub fn is_hardware(&self) -> bool {
+        matches!(self, MeasurementSource::Tpm2 | MeasurementSource::SevSnp)
+    }
+
+    /// Whether this source also makes the node's memory private from the host.
+    ///
+    /// Only a confidential VM does. A TPM attests how a machine booted and
+    /// leaves its memory readable by anyone with root on it, which is why
+    /// `ARCHITECTURE.md` lists that adversary as undefended in every mode that
+    /// is not running in one.
+    pub fn provides_memory_confidentiality(&self) -> bool {
+        matches!(self, MeasurementSource::SevSnp)
+    }
+}
+
 impl std::fmt::Display for MeasurementSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MeasurementSource::Tpm2 => write!(f, "tpm2"),
+            MeasurementSource::SevSnp => write!(f, "sev_snp"),
             MeasurementSource::SoftwareMeasurement => write!(f, "software_measurement"),
         }
     }
@@ -631,6 +668,69 @@ pub struct ExpectedMeasurementsConfig {
     /// Minimum acceptable security version number.
     #[serde(default)]
     pub min_isv_svn: u16,
+    /// Pins for an AMD SEV-SNP platform.
+    ///
+    /// Required when `measurement_source = "sev_snp"`: without a pinned AMD
+    /// root there is nothing for the chip's endorsement key to chain to, and a
+    /// report proves only that it is internally consistent.
+    #[serde(default)]
+    pub sev_snp: Option<SevSnpPinsConfig>,
+}
+
+/// Operator pins for an AMD SEV-SNP platform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SevSnpPinsConfig {
+    /// The AMD Root Key certificate, base64 DER.
+    ///
+    /// Pinned by the operator rather than taken from the platform's own
+    /// certificate cache: a chain that supplies its own root establishes only
+    /// that it is self-consistent. Download it once from AMD, review it, and
+    /// commit it.
+    pub amd_root_der_b64: String,
+    /// Minimum acceptable bootloader SVN.
+    #[serde(default)]
+    pub min_bootloader_svn: u8,
+    /// Minimum acceptable TEE (ASP OS) SVN.
+    #[serde(default)]
+    pub min_tee_svn: u8,
+    /// Minimum acceptable SNP firmware SVN.
+    #[serde(default)]
+    pub min_snp_svn: u8,
+    /// Minimum acceptable microcode SVN.
+    ///
+    /// This is the one that moves when AMD publishes a microcode fix. Leaving
+    /// it at zero accepts a platform running firmware with known, patched
+    /// vulnerabilities.
+    #[serde(default)]
+    pub min_microcode_svn: u8,
+    /// Refuse a guest whose launch policy permits debugging.
+    ///
+    /// Defaults to true and should stay that way: a debuggable guest's memory
+    /// is readable by the hypervisor, which is exactly the party a confidential
+    /// VM excludes.
+    #[serde(default = "default_refuse_debuggable")]
+    pub refuse_debuggable_guest: bool,
+    /// The VMPL a report must have been produced at. Cordon runs at 0.
+    #[serde(default)]
+    pub expected_vmpl: u32,
+}
+
+fn default_refuse_debuggable() -> bool {
+    true
+}
+
+impl Default for SevSnpPinsConfig {
+    fn default() -> Self {
+        Self {
+            amd_root_der_b64: String::new(),
+            min_bootloader_svn: 0,
+            min_tee_svn: 0,
+            min_snp_svn: 0,
+            min_microcode_svn: 0,
+            refuse_debuggable_guest: true,
+            expected_vmpl: 0,
+        }
+    }
 }
 
 impl ExpectedMeasurementsConfig {
@@ -836,17 +936,24 @@ impl CordonConfig {
                     self.mode
                 )));
             }
-            if self.attestation.measurement_source != MeasurementSource::Tpm2 {
+            if !self.attestation.measurement_source.is_hardware() {
                 return Err(CordonError::ConfigError(format!(
                     "attestation.measurement_source = \"{}\" is not permitted in {} \
                      mode. A software measurement is a configuration digest, not a \
-                     hardware root of trust. Set it to \"tpm2\".",
+                     hardware root of trust. Set it to \"sev_snp\" for a confidential \
+                     VM, or \"tpm2\" for a TPM-attested host.",
                     self.attestation.measurement_source, self.mode
                 )));
             }
-            if !self.boot.tpm_required {
+            // A TPM is required only when the measurements come from one. A
+            // confidential VM attests through its own hardware and need not
+            // also expose a vTPM.
+            if self.attestation.measurement_source == MeasurementSource::Tpm2
+                && !self.boot.tpm_required
+            {
                 return Err(CordonError::ConfigError(format!(
-                    "{} mode requires boot.tpm_required = true",
+                    "{} mode with attestation.measurement_source = \"tpm2\" requires \
+                     boot.tpm_required = true",
                     self.mode
                 )));
             }
@@ -857,6 +964,29 @@ impl CordonConfig {
                         "{} mode requires pinned attestation.expected measurements. \
                          Without them the node cannot distinguish a genuine platform \
                          from an impostor. Capture them with `cordon attest --pin`.",
+                        self.mode
+                    )));
+                }
+            }
+
+            // A SEV-SNP report is signed by a per-chip key certified by AMD.
+            // Without a pinned root there is nothing for that certificate to
+            // chain to, and the report degrades to a self-consistent blob.
+            if self.attestation.measurement_source == MeasurementSource::SevSnp {
+                let root = self
+                    .attestation
+                    .expected
+                    .as_ref()
+                    .and_then(|e| e.sev_snp.as_ref())
+                    .map(|snp| snp.amd_root_der_b64.trim())
+                    .unwrap_or("");
+                if root.is_empty() {
+                    return Err(CordonError::ConfigError(format!(
+                        "attestation.measurement_source = \"sev_snp\" in {} mode requires \
+                         a pinned AMD root certificate under \
+                         [attestation.expected.sev_snp]. Without one the chip's \
+                         endorsement key chains to nothing, and the attestation proves \
+                         only that the report is internally consistent.",
                         self.mode
                     )));
                 }

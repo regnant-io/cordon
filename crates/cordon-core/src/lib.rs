@@ -10,6 +10,7 @@
 
 pub mod attack_detector;
 pub mod attestation_service;
+pub mod confidential_vm;
 pub mod config;
 pub mod covert_channel;
 pub mod error;

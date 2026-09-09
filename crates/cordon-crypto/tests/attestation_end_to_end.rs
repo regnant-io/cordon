@@ -15,7 +15,8 @@
 use chrono::Utc;
 use cordon_crypto::attestation::{
     attestation_challenge, compute_combined_hash, AttestationReport, CombinedAttestation,
-    ExpectedMeasurements, PlatformQuoteStatus, TeeQuote, TeeType, TpmPcrSet, TpmQuote,
+    ExpectedMeasurements, PlatformEvidence, PlatformQuoteStatus, TeeQuote, TeeType, TpmPcrSet,
+    TpmQuote,
 };
 use cordon_crypto::tpm2::{
     compute_pcr_digest, TPM_ALG_ECC, TPM_ALG_ECDSA, TPM_ALG_NULL, TPM_ALG_SHA256,
@@ -144,13 +145,15 @@ fn node_produces_report(nonce: &str, signing_key_hex: &str) -> NodeReport {
         enclave_signing_key_hex: signing_key_hex.to_string(),
     };
 
-    let combined_hash = compute_combined_hash(&tpm_quote, &tee_quote).unwrap();
+    let combined_hash =
+        compute_combined_hash(&tpm_quote, &tee_quote, &PlatformEvidence::None).unwrap();
 
     NodeReport {
         report: AttestationReport {
             combined: CombinedAttestation {
                 tpm_quote,
                 tee_quote,
+                platform_evidence: PlatformEvidence::None,
                 combined_hash,
                 node_id: "node-1".into(),
                 cordon_version: "2.0.0".into(),
@@ -174,6 +177,7 @@ fn client_pins() -> ExpectedMeasurements {
         mrsigner: "5".repeat(64),
         min_isv_svn: 1,
         tee_type: TeeType::AmdSevSnp,
+        sev_snp: None,
     }
 }
 
@@ -252,8 +256,12 @@ fn a_report_claiming_a_key_the_quote_does_not_bind_is_refused() {
     swapped.combined.tee_quote.enclave_signing_key_hex = "1".repeat(64);
     // Re-digest so the report is internally consistent — the substitution has
     // to be caught by the quote, not merely by the combined hash.
-    swapped.combined.combined_hash =
-        compute_combined_hash(&swapped.combined.tpm_quote, &swapped.combined.tee_quote).unwrap();
+    swapped.combined.combined_hash = compute_combined_hash(
+        &swapped.combined.tpm_quote,
+        &swapped.combined.tee_quote,
+        &swapped.combined.platform_evidence,
+    )
+    .unwrap();
 
     let err = over_the_wire(&swapped)
         .verify(&client_pins(), nonce)
@@ -281,8 +289,12 @@ fn a_report_whose_measurements_were_not_quoted_is_refused() {
         .tpm_quote
         .pcr_values
         .set(4, format!("sha256:{}", "ab".repeat(32)));
-    lying.combined.combined_hash =
-        compute_combined_hash(&lying.combined.tpm_quote, &lying.combined.tee_quote).unwrap();
+    lying.combined.combined_hash = compute_combined_hash(
+        &lying.combined.tpm_quote,
+        &lying.combined.tee_quote,
+        &lying.combined.platform_evidence,
+    )
+    .unwrap();
 
     let mut pins = client_pins();
     pins.pcr_values
@@ -308,8 +320,12 @@ fn stripping_the_signed_message_removes_the_hardware_claim() {
 
     let mut stripped = produced.report.clone();
     stripped.combined.tpm_quote.attest_message_hex = String::new();
-    stripped.combined.combined_hash =
-        compute_combined_hash(&stripped.combined.tpm_quote, &stripped.combined.tee_quote).unwrap();
+    stripped.combined.combined_hash = compute_combined_hash(
+        &stripped.combined.tpm_quote,
+        &stripped.combined.tee_quote,
+        &stripped.combined.platform_evidence,
+    )
+    .unwrap();
 
     let established = over_the_wire(&stripped)
         .verify(&client_pins(), nonce)
@@ -337,8 +353,12 @@ fn a_quote_from_a_different_attestation_key_is_refused() {
         .tpm_quote
         .aik_public_key_hex
         .clone();
-    mixed.combined.combined_hash =
-        compute_combined_hash(&mixed.combined.tpm_quote, &mixed.combined.tee_quote).unwrap();
+    mixed.combined.combined_hash = compute_combined_hash(
+        &mixed.combined.tpm_quote,
+        &mixed.combined.tee_quote,
+        &mixed.combined.platform_evidence,
+    )
+    .unwrap();
 
     let err = over_the_wire(&mixed)
         .verify(&client_pins(), nonce)
