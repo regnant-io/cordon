@@ -13,9 +13,13 @@
 //! * **Web UI compiled out of the response path.** `--no-webui` is passed when
 //!   the binary supports it, and after startup Cordon *verifies* that the child
 //!   does not serve an HTML document at `/`. If it does, startup fails closed.
-//! * **Per-boot API key.** A 32-byte random key is generated for each launch and
-//!   required on every request, so another local process cannot drive the
-//!   runtime even if it discovers the port.
+//! * **Per-boot API key, passed by file.** A 32-byte random key is generated for
+//!   each launch and required on every request, so another local process cannot
+//!   drive the runtime even if it discovers the port. The key is handed over in
+//!   an owner-only temporary file rather than on the command line, because a
+//!   command line is world-readable through `ps` and `/proc/<pid>/cmdline` —
+//!   which would hand the key to exactly the local process this is meant to
+//!   exclude.
 //!
 //! The child is terminated when the supervisor is dropped and when the process
 //! exits, and it is restarted automatically if it dies while Cordon is running.
@@ -78,14 +82,28 @@ impl LlamaRuntimeConfig {
     }
 }
 
+/// Command-line flags this `llama-server` build accepts, probed once at startup.
+#[derive(Debug, Clone, Copy)]
+struct SupportedFlags {
+    /// `--no-webui` removes the runtime's browsable UI from the response path.
+    no_webui: bool,
+    /// `--api-key-file` reads the key from a file instead of the command line.
+    api_key_file: bool,
+}
+
 /// A running, supervised llama.cpp server.
 pub struct LlamaSupervisor {
     config: LlamaRuntimeConfig,
     endpoint: SocketAddr,
     api_key: String,
+    /// The API key on disk, owner-only, deleted when the supervisor drops.
+    ///
+    /// Held for the supervisor's whole life rather than only across the spawn,
+    /// because a restart re-launches the child against the same file.
+    api_key_file: Option<tempfile::NamedTempFile>,
     child: Arc<Mutex<Option<Child>>>,
     stderr_ring: Arc<Mutex<Vec<String>>>,
-    supports_no_webui: bool,
+    flags: SupportedFlags,
     http: reqwest::Client,
 }
 
@@ -97,8 +115,8 @@ impl LlamaSupervisor {
     pub async fn start(config: LlamaRuntimeConfig) -> CordonResult<Self> {
         Self::validate_paths(&config)?;
 
-        let supports_no_webui = probe_no_webui_support(&config.binary).await;
-        if !supports_no_webui {
+        let flags = probe_supported_flags(&config.binary).await;
+        if !flags.no_webui {
             tracing::warn!(
                 binary = %config.binary.display(),
                 "llama-server does not accept --no-webui; the runtime UI is suppressed \
@@ -109,6 +127,24 @@ impl LlamaSupervisor {
 
         let endpoint = reserve_loopback_port()?;
         let api_key = generate_api_key();
+
+        // Prefer handing the key over in a file. A command line is readable by
+        // every local user through `ps` and `/proc/<pid>/cmdline`, so passing
+        // the key as an argument would publish it to precisely the local
+        // process the key exists to keep out.
+        let api_key_file = if flags.api_key_file {
+            Some(write_api_key_file(&api_key)?)
+        } else {
+            tracing::warn!(
+                binary = %config.binary.display(),
+                "llama-server does not accept --api-key-file, so the runtime's \
+                 per-boot API key must be passed on its command line, where any \
+                 local user can read it from the process table. The runtime is \
+                 still bound to loopback on an ephemeral port. Upgrade llama.cpp \
+                 to remove this exposure."
+            );
+            None
+        };
 
         let http = reqwest::Client::builder()
             // The runtime is on loopback; no proxy should ever be consulted.
@@ -123,9 +159,10 @@ impl LlamaSupervisor {
             config,
             endpoint,
             api_key,
+            api_key_file,
             child: Arc::new(Mutex::new(None)),
             stderr_ring: Arc::new(Mutex::new(Vec::new())),
-            supports_no_webui,
+            flags,
             http,
         };
 
@@ -168,8 +205,6 @@ impl LlamaSupervisor {
             .arg("127.0.0.1")
             .arg("--port")
             .arg(self.endpoint.port().to_string())
-            .arg("--api-key")
-            .arg(&self.api_key)
             .arg("--ctx-size")
             .arg(self.config.ctx_size.to_string())
             .arg("--n-gpu-layers")
@@ -177,10 +212,19 @@ impl LlamaSupervisor {
             .arg("--parallel")
             .arg(self.config.parallel_slots.to_string());
 
+        match &self.api_key_file {
+            Some(file) => {
+                cmd.arg("--api-key-file").arg(file.path());
+            }
+            None => {
+                cmd.arg("--api-key").arg(&self.api_key);
+            }
+        }
+
         if let Some(threads) = self.config.threads {
             cmd.arg("--threads").arg(threads.to_string());
         }
-        if self.supports_no_webui {
+        if self.flags.no_webui {
             cmd.arg("--no-webui");
         }
         for arg in &self.config.extra_args {
@@ -396,8 +440,37 @@ fn generate_api_key() -> String {
     hex::encode(bytes)
 }
 
-/// Ask the binary whether it accepts `--no-webui`.
-async fn probe_no_webui_support(binary: &Path) -> bool {
+/// Write the per-boot API key to an owner-only temporary file.
+///
+/// `NamedTempFile` creates with `O_EXCL` and mode 0600 on Unix, so the file
+/// cannot be pre-created or raced by another local user, and it is removed when
+/// the supervisor drops.
+fn write_api_key_file(api_key: &str) -> CordonResult<tempfile::NamedTempFile> {
+    use std::io::Write as _;
+
+    let mut file = tempfile::Builder::new()
+        .prefix("cordon-runtime-key-")
+        .tempfile()
+        .map_err(|e| {
+            CordonError::RuntimeUnavailable(format!("cannot create the runtime key file: {}", e))
+        })?;
+
+    // llama.cpp reads the whole file and trims it; no trailing newline is
+    // written so there is nothing to disagree about.
+    file.write_all(api_key.as_bytes())
+        .and_then(|_| file.as_file().sync_all())
+        .map_err(|e| {
+            CordonError::RuntimeUnavailable(format!("cannot write the runtime key file: {}", e))
+        })?;
+
+    Ok(file)
+}
+
+/// Ask the binary which of the flags Cordon depends on it accepts.
+///
+/// The help text is read once and searched for every flag, rather than
+/// launching the binary again per flag.
+async fn probe_supported_flags(binary: &Path) -> SupportedFlags {
     let output = Command::new(binary)
         .arg("--help")
         .stdin(Stdio::null())
@@ -414,9 +487,17 @@ async fn probe_no_webui_support(binary: &Path) -> bool {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
-            text.contains("--no-webui")
+            SupportedFlags {
+                no_webui: text.contains("--no-webui"),
+                api_key_file: text.contains("--api-key-file"),
+            }
         }
-        Err(_) => false,
+        // A binary whose help cannot be read is assumed to support neither, so
+        // the failure is a loud warning rather than a flag the child rejects.
+        Err(_) => SupportedFlags {
+            no_webui: false,
+            api_key_file: false,
+        },
     }
 }
 
@@ -478,6 +559,34 @@ mod tests {
         let b = generate_api_key();
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
+    }
+
+    /// The key must reach the child through a file the owner alone can read.
+    /// Passing it as an argument would publish it through `ps` to the very
+    /// local process the key exists to keep out.
+    #[test]
+    fn the_api_key_file_holds_the_key_and_nothing_else() {
+        let key = generate_api_key();
+        let file = write_api_key_file(&key).unwrap();
+        assert_eq!(std::fs::read_to_string(file.path()).unwrap(), key);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_api_key_file_is_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = write_api_key_file(&generate_api_key()).unwrap();
+        let mode = std::fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "runtime key file mode was {:o}", mode);
+    }
+
+    #[test]
+    fn the_api_key_file_is_removed_with_the_supervisor() {
+        let path = {
+            let file = write_api_key_file(&generate_api_key()).unwrap();
+            file.path().to_path_buf()
+        };
+        assert!(!path.exists(), "the runtime key file outlived its owner");
     }
 
     #[tokio::test]
