@@ -22,6 +22,14 @@ use cordon_core::{
 mod doctor;
 mod pull;
 
+/// Where `cordon serve` listens when no configuration file and no `--bind` say
+/// otherwise.
+const DEFAULT_BIND: &str = "0.0.0.0:8443";
+
+/// Where `cordon serve` keeps the audit log and bundles when no configuration
+/// file and no `--data-dir` say otherwise.
+const DEFAULT_DATA_DIR: &str = "/var/lib/cordon";
+
 #[derive(Parser)]
 #[command(
     name = "cordon",
@@ -115,18 +123,27 @@ enum Command {
         /// Configuration file.
         #[arg(short, long, value_name = "FILE")]
         config: Option<PathBuf>,
-        /// Address to bind the API to.
-        #[arg(short, long, default_value = "0.0.0.0:8443")]
-        bind: String,
+        /// Address to bind the API to. Overrides `network.bind_address` and
+        /// `network.api_port`. Defaults to those when a configuration file is
+        /// given, and to 0.0.0.0:8443 when one is not.
+        ///
+        /// Deliberately has no clap default: one would silently win over the
+        /// configuration, so an operator who wrote `bind_address = "127.0.0.1"`
+        /// expecting a loopback-only node would get one published to the
+        /// network instead.
+        #[arg(short, long)]
+        bind: Option<String>,
         /// Node ID. Generated if absent.
         #[arg(long)]
         node_id: Option<String>,
         /// Deployment ID. Feeds every derived key, so it must be stable.
         #[arg(long)]
         deployment_id: Option<String>,
-        /// Directory for audit logs and bundles.
-        #[arg(short, long, default_value = "/var/lib/cordon")]
-        data_dir: PathBuf,
+        /// Directory for audit logs and bundles. Overrides `audit.log_path` and
+        /// `model_store.path`. Defaults to those when a configuration file is
+        /// given, and to /var/lib/cordon when one is not.
+        #[arg(short, long)]
+        data_dir: Option<PathBuf>,
         /// TLS certificate.
         #[arg(long)]
         tls_cert: Option<PathBuf>,
@@ -234,8 +251,23 @@ async fn main() -> Result<()> {
                     deployment_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 ),
             };
-            cfg.audit.log_path = data_dir.join("audit");
-            cfg.model_store.path = data_dir.join("bundles");
+            // A path given on the command line wins; otherwise the
+            // configuration's own paths stand. Overwriting them unconditionally
+            // meant `audit.log_path` was a field an operator could set and
+            // Cordon ignored: the log went to the `--data-dir` default and the
+            // configured directory was never created.
+            match (&data_dir, &config) {
+                (Some(dir), _) => {
+                    cfg.audit.log_path = dir.join("audit");
+                    cfg.model_store.path = dir.join("bundles");
+                }
+                (None, None) => {
+                    let dir = PathBuf::from(DEFAULT_DATA_DIR);
+                    cfg.audit.log_path = dir.join("audit");
+                    cfg.model_store.path = dir.join("bundles");
+                }
+                (None, Some(_)) => {}
+            }
 
             init_logging(&cfg.log_level, true);
 
@@ -251,9 +283,25 @@ async fn main() -> Result<()> {
             let tls = if no_tls {
                 None
             } else {
+                // Same precedence as everything else here: the flag, then the
+                // configuration, then the default. Reaching for `data_dir`
+                // first meant `network.tls_cert_path` was never read when the
+                // node was started from a configuration file.
                 Some(TlsConfig {
-                    cert_path: tls_cert.unwrap_or_else(|| data_dir.join("tls/server.crt")),
-                    key_path: tls_key.unwrap_or_else(|| data_dir.join("tls/server.key")),
+                    cert_path: tls_cert.unwrap_or_else(|| {
+                        if config.is_some() {
+                            cfg.network.tls_cert_path.clone()
+                        } else {
+                            PathBuf::from(DEFAULT_DATA_DIR).join("tls/server.crt")
+                        }
+                    }),
+                    key_path: tls_key.unwrap_or_else(|| {
+                        if config.is_some() {
+                            cfg.network.tls_key_path.clone()
+                        } else {
+                            PathBuf::from(DEFAULT_DATA_DIR).join("tls/server.key")
+                        }
+                    }),
                     client_ca_path: cfg.network.client_ca_path.clone(),
                     mode: if cfg.network.require_mtls {
                         TlsMode::Mutual
@@ -263,9 +311,51 @@ async fn main() -> Result<()> {
                 })
             };
 
+            let bind = resolve_bind_address(bind.as_deref(), &cfg, config.is_some())?;
             serve_with(cfg, &bind, tls).await
         }
     }
+}
+
+/// Where the API should listen: the flag if one was given, else the
+/// configuration, else the documented default.
+///
+/// Written as its own function so the precedence is stated once and testable.
+/// The bug it replaces was a clap `default_value` on `--bind`, which is
+/// indistinguishable from an operator typing it — so the configuration's
+/// `bind_address` and `api_port` were unreachable, and a node an operator had
+/// confined to loopback listened on every interface instead.
+fn resolve_bind_address(
+    flag: Option<&str>,
+    config: &CordonConfig,
+    from_file: bool,
+) -> Result<String> {
+    if let Some(bind) = flag {
+        // Parsed here rather than deep in `serve_with`, so a typo is reported
+        // before the node builds any state.
+        bind.parse::<SocketAddr>()
+            .with_context(|| format!("--bind {} is not a valid address:port", bind))?;
+        return Ok(bind.to_string());
+    }
+    if !from_file {
+        return Ok(DEFAULT_BIND.to_string());
+    }
+
+    // An IPv6 literal has to be bracketed before a port can be appended.
+    let host = &config.network.bind_address;
+    let bind = if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, config.network.api_port)
+    } else {
+        format!("{}:{}", host, config.network.api_port)
+    };
+    bind.parse::<SocketAddr>().with_context(|| {
+        format!(
+            "network.bind_address = \"{}\" with network.api_port = {} is not a valid \
+             address to listen on",
+            host, config.network.api_port
+        )
+    })?;
+    Ok(bind)
 }
 
 /// Refuse a non-loopback `--bind` on `cordon run` unless explicitly overridden.
@@ -778,6 +868,94 @@ fn print_default_config(mode: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_binding(host: &str, port: u16) -> CordonConfig {
+        let mut c = CordonConfig::default_light("n".into(), "d".into());
+        c.network.bind_address = host.into();
+        c.network.api_port = port;
+        c
+    }
+
+    /// The bug this replaces: `--bind` carried a clap default, which is
+    /// indistinguishable from an operator typing it, so the configuration's
+    /// `bind_address` and `api_port` could never take effect.
+    #[test]
+    fn a_configurations_bind_address_is_used_when_no_flag_is_given() {
+        let config = config_binding("127.0.0.1", 8479);
+        assert_eq!(
+            resolve_bind_address(None, &config, true).unwrap(),
+            "127.0.0.1:8479"
+        );
+    }
+
+    /// The security-relevant half. An operator who confines a node to loopback
+    /// in the configuration must not get one listening on every interface.
+    #[test]
+    fn a_loopback_configuration_does_not_silently_become_a_public_one() {
+        let config = config_binding("127.0.0.1", 8443);
+        let resolved = resolve_bind_address(None, &config, true).unwrap();
+        assert!(
+            !resolved.starts_with("0.0.0.0"),
+            "a node confined to loopback was published on {}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn an_explicit_flag_overrides_the_configuration() {
+        let config = config_binding("127.0.0.1", 8479);
+        assert_eq!(
+            resolve_bind_address(Some("0.0.0.0:9000"), &config, true).unwrap(),
+            "0.0.0.0:9000"
+        );
+    }
+
+    /// Without a configuration file there is nothing to read, so the documented
+    /// default stands.
+    #[test]
+    fn the_documented_default_applies_when_there_is_no_configuration() {
+        let config = config_binding("127.0.0.1", 8479);
+        assert_eq!(
+            resolve_bind_address(None, &config, false).unwrap(),
+            DEFAULT_BIND
+        );
+    }
+
+    #[test]
+    fn an_ipv6_bind_address_is_bracketed_before_its_port() {
+        let config = config_binding("::1", 8443);
+        assert_eq!(
+            resolve_bind_address(None, &config, true).unwrap(),
+            "[::1]:8443"
+        );
+
+        let config = config_binding("::", 8443);
+        assert_eq!(
+            resolve_bind_address(None, &config, true).unwrap(),
+            "[::]:8443"
+        );
+    }
+
+    /// A hostname is not an address to listen on, and saying so here is better
+    /// than a parse failure from inside the server.
+    #[test]
+    fn an_unusable_bind_address_is_refused_with_the_values_that_caused_it() {
+        let config = config_binding("example.com", 8443);
+        let error = resolve_bind_address(None, &config, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("example.com"), "{}", error);
+        assert!(error.contains("8443"), "{}", error);
+    }
+
+    #[test]
+    fn a_malformed_flag_names_itself_in_the_error() {
+        let config = config_binding("127.0.0.1", 8443);
+        let error = resolve_bind_address(Some("not-an-address"), &config, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not-an-address"), "{}", error);
+    }
 
     #[test]
     fn loopback_binds_are_accepted() {

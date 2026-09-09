@@ -973,6 +973,14 @@ interface for the API. Use `sev_snp` for a confidential VM, or `tpm2` for a
 TPM-attested host. The `[attestation.expected.nitro]` pins remain useful for
 verifying a document that reaches Cordon from elsewhere.
 
+**The node is not listening where the configuration says** — check you are not
+also passing `--bind`, which overrides `network.bind_address` and
+`network.api_port`. The same applies to `--data-dir` over `audit.log_path` and
+`model_store.path`, and `--tls-cert`/`--tls-key` over `network.tls_cert_path`
+and `network.tls_key_path`. Omit the flag and the configuration is used. (Before
+2.1 the flags carried defaults and always won, so the configuration's values
+were unreachable.)
+
 **`--bind <addr> is not a loopback address`** — `cordon run` serves plain HTTP
 with header-derived identity, so a routable bind publishes an unauthenticated
 inference endpoint. Use `cordon serve` with mTLS, forward the port over SSH, or

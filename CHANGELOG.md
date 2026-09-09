@@ -171,6 +171,30 @@ instead of asking the node whether it approves of itself.
   hash-chained, not signed, gone with the process. They are recorded now,
   including every read of the audit log itself.
 
+### `cordon serve` ignored the configuration file it was given
+
+Three settings an operator writes in a configuration file were overwritten
+before the node read them, because the command-line flags that shadow them
+carried clap `default_value`s — and a default is indistinguishable from a value
+the operator typed.
+
+- **`network.bind_address` and `network.api_port`.** `--bind` defaulted to
+  `0.0.0.0:8443`, which always won. An operator who confined a node to loopback
+  in the configuration got one listening on every interface. That is the same
+  exposure `cordon run --bind 0.0.0.0` was hardened against in this release,
+  arrived at from the opposite direction: there the operator asked for it, here
+  they asked for the opposite and got it anyway.
+- **`audit.log_path` and `model_store.path`**, overwritten from `--data-dir`,
+  which defaulted to `/var/lib/cordon`. The configured audit directory was
+  never created and the log went somewhere else.
+- **`network.tls_cert_path` and `network.tls_key_path`**, likewise.
+
+Each flag now takes no default. Given, it wins; absent, the configuration
+stands; absent with no configuration file, the documented default applies. The
+precedence lives in one function with tests, including that an IPv6
+`bind_address` is bracketed before its port and that a `bind_address` which is
+not an address to listen on is refused naming the values that caused it.
+
 ### Removed
 
 Configuration Cordon did not act on, because a field an operator can set and
@@ -206,7 +230,7 @@ reads are recorded like anyone's.
 
 `cordon-audit`, the crate implementing the tamper-evident chain, had no tests of
 its own. It has seventeen, and one of them found the rotation bug above. The
-workspace suite is 376 tests, up from 170.
+workspace suite is 383 tests, up from 170.
 
 ## [2.0.0] — 2026-08-30
 
