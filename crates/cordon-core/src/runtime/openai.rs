@@ -1,0 +1,674 @@
+//! OpenAI-compatible HTTP backend.
+//!
+//! Speaks `/v1/chat/completions` to either a Cordon-supervised llama.cpp server
+//! or an endpoint the operator points Cordon at. A single pooled
+//! [`reqwest::Client`] is shared across requests, and both the unary and the
+//! streaming path are fully asynchronous; no request ever occupies a runtime
+//! worker thread waiting on I/O.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use parking_lot::RwLock;
+use serde_json::json;
+
+use crate::error::{CordonError, CordonResult};
+use crate::inference::{
+    FinishReason, InferenceBackend, InferenceRequest, RawInferenceOutput, StreamChunk, TokenStream,
+    TokenUsage,
+};
+
+use super::supervisor::LlamaSupervisor;
+
+/// Where an [`OpenAiBackend`] sends its requests.
+enum Upstream {
+    /// A llama.cpp server Cordon spawned and owns.
+    Supervised(Arc<LlamaSupervisor>),
+    /// An endpoint the operator configured. Cordon does not control its
+    /// lifecycle or its exposure.
+    External {
+        base_url: String,
+        api_key: Option<String>,
+    },
+}
+
+/// An OpenAI-compatible chat-completions backend.
+pub struct OpenAiBackend {
+    upstream: Upstream,
+    http: reqwest::Client,
+    /// Model identifier most recently requested of an external endpoint.
+    ///
+    /// Only the external upstream reports from this. A supervised runtime is
+    /// asked what it loaded instead; see [`OpenAiBackend::loaded_model`].
+    last_model: RwLock<Option<String>>,
+    backend_name: &'static str,
+}
+
+impl OpenAiBackend {
+    /// Build a backend over a Cordon-supervised llama.cpp runtime.
+    pub fn supervised(supervisor: Arc<LlamaSupervisor>) -> CordonResult<Self> {
+        Ok(Self {
+            upstream: Upstream::Supervised(supervisor),
+            http: build_client(true)?,
+            last_model: RwLock::new(None),
+            backend_name: "llama.cpp (supervised)",
+        })
+    }
+
+    /// Build a backend over an operator-provided endpoint.
+    ///
+    /// `base_url` is the server root (for example `http://127.0.0.1:8000`); the
+    /// `/v1/chat/completions` path is appended by this backend.
+    pub fn external(base_url: String, api_key: Option<String>) -> CordonResult<Self> {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        let loopback_only = is_loopback_url(&base_url);
+        Ok(Self {
+            upstream: Upstream::External { base_url, api_key },
+            http: build_client(loopback_only)?,
+            last_model: RwLock::new(None),
+            backend_name: "openai-compatible (external)",
+        })
+    }
+
+    fn completions_url(&self) -> String {
+        match &self.upstream {
+            Upstream::Supervised(s) => format!("{}/v1/chat/completions", s.base_url()),
+            Upstream::External { base_url, .. } => format!("{}/v1/chat/completions", base_url),
+        }
+    }
+
+    fn health_url(&self) -> String {
+        match &self.upstream {
+            Upstream::Supervised(s) => format!("{}/health", s.base_url()),
+            Upstream::External { base_url, .. } => format!("{}/health", base_url),
+        }
+    }
+
+    fn auth_token(&self) -> Option<String> {
+        match &self.upstream {
+            Upstream::Supervised(s) => Some(s.api_key().to_string()),
+            Upstream::External { api_key, .. } => api_key.clone(),
+        }
+    }
+
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.auth_token() {
+            Some(token) => builder.bearer_auth(token),
+            None => builder,
+        }
+    }
+
+    fn request_body(&self, request: &InferenceRequest, stream: bool) -> serde_json::Value {
+        let mut body = json!({
+            "model": request.model_id,
+            "messages": request.messages,
+            "max_tokens": request.params.max_tokens,
+            "temperature": request.params.temperature,
+            "top_p": request.params.top_p,
+            "stream": stream,
+        });
+
+        // Omit optional knobs when unset so servers that reject them (or treat
+        // zero as meaningful) behave predictably.
+        if request.params.top_k > 0 {
+            body["top_k"] = json!(request.params.top_k);
+        }
+        if (request.params.repetition_penalty - 1.0).abs() > f32::EPSILON {
+            body["repeat_penalty"] = json!(request.params.repetition_penalty);
+        }
+        if !request.params.stop.is_empty() {
+            body["stop"] = json!(request.params.stop);
+        }
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+        body
+    }
+
+    async fn send(
+        &self,
+        request: &InferenceRequest,
+        stream: bool,
+    ) -> CordonResult<reqwest::Response> {
+        let body = self.request_body(request, stream);
+        let builder = self
+            .http
+            .post(self.completions_url())
+            .timeout(request.timeout)
+            .json(&body);
+
+        let response = self.apply_auth(builder).send().await.map_err(|e| {
+            CordonError::InferenceFailed(format!(
+                "cannot reach the model runtime at {}: {}",
+                self.completions_url(),
+                e
+            ))
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Surface the runtime's own message; it is the operator's most
+            // useful diagnostic and contains no client plaintext.
+            let detail = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no response body>".into());
+            let detail = truncate(&detail, 512);
+            return Err(CordonError::InferenceFailed(format!(
+                "model runtime returned HTTP {}: {}",
+                status, detail
+            )));
+        }
+
+        // Only worth recording for an endpoint Cordon does not own. A
+        // supervised runtime already knows what it loaded.
+        if matches!(self.upstream, Upstream::External { .. }) {
+            *self.last_model.write() = Some(request.model_id.clone());
+        }
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl InferenceBackend for OpenAiBackend {
+    async fn infer(&self, request: &InferenceRequest) -> CordonResult<RawInferenceOutput> {
+        let started = Instant::now();
+        let response = self.send(request, false).await?;
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            CordonError::InferenceFailed(format!("model runtime returned malformed JSON: {}", e))
+        })?;
+
+        let choice = body.get("choices").and_then(|c| c.get(0)).ok_or_else(|| {
+            CordonError::InferenceFailed("model runtime response contained no choices".into())
+        })?;
+
+        let text = choice
+            .pointer("/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let finish_reason = choice
+            .get("finish_reason")
+            .and_then(|v| v.as_str())
+            .map(FinishReason::from_wire)
+            .unwrap_or(FinishReason::Stop);
+
+        let usage = parse_usage(body.get("usage"));
+
+        Ok(RawInferenceOutput {
+            text,
+            usage,
+            finish_reason,
+            latency_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    async fn infer_stream(&self, request: &InferenceRequest) -> CordonResult<TokenStream> {
+        let response = self.send(request, true).await?;
+        let byte_stream = response.bytes_stream();
+
+        // Server-sent events arrive as `data: {json}` records separated by blank
+        // lines, terminated by `data: [DONE]`. Both a record and a single UTF-8
+        // character can be split across TCP reads, so two buffers are carried
+        // between chunks: `pending` holds bytes that are not yet a whole
+        // character, and `buffer` holds decoded text that is not yet a whole
+        // record.
+        let stream = futures::stream::unfold(
+            (
+                byte_stream,
+                String::new(),
+                Vec::<u8>::new(),
+                SseState::default(),
+            ),
+            |(mut bytes, mut buffer, mut pending, mut state)| async move {
+                loop {
+                    // Drain anything already buffered before reading more.
+                    if let Some(event) = take_event(&mut buffer) {
+                        match parse_sse_event(&event, &mut state) {
+                            SseOutcome::Chunk(chunk) => {
+                                return Some((Ok(chunk), (bytes, buffer, pending, state)))
+                            }
+                            SseOutcome::Finished => {
+                                let done = StreamChunk::Done {
+                                    finish_reason: state.finish_reason,
+                                    usage: state.usage,
+                                };
+                                return Some((Ok(done), (bytes, buffer, pending, state)));
+                            }
+                            SseOutcome::Continue => continue,
+                        }
+                    }
+
+                    match bytes.next().await {
+                        Some(Ok(part)) => {
+                            pending.extend_from_slice(&part);
+                            decode_utf8_prefix(&mut pending, &mut buffer);
+                        }
+                        Some(Err(e)) => {
+                            let err = CordonError::InferenceFailed(format!(
+                                "model runtime stream failed: {}",
+                                e
+                            ));
+                            return Some((Err(err), (bytes, buffer, pending, state)));
+                        }
+                        None => {
+                            if state.terminated {
+                                return None;
+                            }
+                            // Trailing bytes that never completed a character
+                            // are the runtime truncating mid-stream. Surface
+                            // them as replacement characters rather than
+                            // silently discarding output.
+                            if !pending.is_empty() {
+                                buffer.push_str(&String::from_utf8_lossy(&pending));
+                                pending.clear();
+                                if let Some(event) = take_event(&mut buffer) {
+                                    if let SseOutcome::Chunk(chunk) =
+                                        parse_sse_event(&event, &mut state)
+                                    {
+                                        return Some((Ok(chunk), (bytes, buffer, pending, state)));
+                                    }
+                                }
+                            }
+                            state.terminated = true;
+                            let done = StreamChunk::Done {
+                                finish_reason: state.finish_reason,
+                                usage: state.usage,
+                            };
+                            return Some((Ok(done), (bytes, buffer, pending, state)));
+                        }
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(stream))
+    }
+
+    fn backend_name(&self) -> &'static str {
+        self.backend_name
+    }
+
+    /// What the runtime has resident, which is not the same question as what a
+    /// client last asked for.
+    ///
+    /// Cordon spawned the supervised runtime against one model file and can
+    /// answer from the start. It did not spawn an external endpoint, cannot ask
+    /// that process what it loaded, and will not guess: the model identifier on
+    /// the most recent accepted request is the only evidence Cordon holds, and
+    /// before the first request there is none. Reporting a client's requested
+    /// identifier as though it were the loaded model would be the same mistake
+    /// in both cases; it is merely unavoidable in one of them.
+    async fn loaded_model(&self) -> Option<String> {
+        match &self.upstream {
+            Upstream::Supervised(supervisor) => Some(supervisor.model_id()),
+            Upstream::External { .. } => self.last_model.read().clone(),
+        }
+    }
+
+    async fn is_ready(&self) -> bool {
+        if let Upstream::Supervised(s) = &self.upstream {
+            if !s.is_running() {
+                return false;
+            }
+        }
+        let builder = self
+            .http
+            .get(self.health_url())
+            .timeout(Duration::from_secs(3));
+        self.apply_auth(builder)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    }
+
+    async fn shutdown(&self) -> CordonResult<()> {
+        if let Upstream::Supervised(s) = &self.upstream {
+            s.terminate().await;
+        }
+        Ok(())
+    }
+}
+
+/// Accumulated state across one SSE stream.
+#[derive(Default, Clone, Copy)]
+struct SseState {
+    finish_reason: FinishReason,
+    usage: TokenUsage,
+    terminated: bool,
+}
+
+enum SseOutcome {
+    Chunk(StreamChunk),
+    Finished,
+    Continue,
+}
+
+/// Move every complete UTF-8 character out of `pending` and into `text`.
+///
+/// A read can end in the middle of a multi-byte character. Those trailing bytes
+/// stay in `pending` for the next read to complete; dropping them, or replacing
+/// them with U+FFFD, would corrupt the model's output at an arbitrary TCP
+/// boundary. Bytes that are genuinely invalid (not merely incomplete) are
+/// consumed as one replacement character so a malformed stream cannot wedge the
+/// decoder.
+fn decode_utf8_prefix(pending: &mut Vec<u8>, text: &mut String) {
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(valid) => {
+                text.push_str(valid);
+                pending.clear();
+                return;
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                // SAFETY-free: `valid_up_to` is by definition a boundary of a
+                // well-formed prefix, so this slice is valid UTF-8.
+                text.push_str(&String::from_utf8_lossy(&pending[..valid_up_to]));
+
+                match e.error_len() {
+                    // An incomplete trailing character: keep it for the next read.
+                    None => {
+                        pending.drain(..valid_up_to);
+                        return;
+                    }
+                    // Genuinely invalid bytes: consume them and keep going.
+                    Some(bad) => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        pending.drain(..valid_up_to + bad);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Pull one complete SSE record off the front of `buffer`, if one is present.
+fn take_event(buffer: &mut String) -> Option<String> {
+    let idx = buffer.find("\n\n").or_else(|| buffer.find("\r\n\r\n"))?;
+    let sep_len = if buffer[idx..].starts_with("\r\n\r\n") {
+        4
+    } else {
+        2
+    };
+    let event = buffer[..idx].to_string();
+    buffer.drain(..idx + sep_len);
+    Some(event)
+}
+
+fn parse_sse_event(event: &str, state: &mut SseState) -> SseOutcome {
+    let mut payload = String::new();
+    for line in event.lines() {
+        if let Some(rest) = line.strip_prefix("data:") {
+            payload.push_str(rest.trim());
+        }
+    }
+
+    if payload.is_empty() {
+        return SseOutcome::Continue;
+    }
+    if payload == "[DONE]" {
+        state.terminated = true;
+        return SseOutcome::Finished;
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(&payload) {
+        Ok(v) => v,
+        Err(_) => return SseOutcome::Continue,
+    };
+
+    if let Some(usage) = value.get("usage") {
+        if !usage.is_null() {
+            state.usage = parse_usage(Some(usage));
+        }
+    }
+
+    let Some(choice) = value.get("choices").and_then(|c| c.get(0)) else {
+        return SseOutcome::Continue;
+    };
+
+    if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+        state.finish_reason = FinishReason::from_wire(reason);
+    }
+
+    let delta = choice
+        .pointer("/delta/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    if delta.is_empty() {
+        SseOutcome::Continue
+    } else {
+        SseOutcome::Chunk(StreamChunk::Delta(delta.to_string()))
+    }
+}
+
+fn parse_usage(usage: Option<&serde_json::Value>) -> TokenUsage {
+    let Some(usage) = usage else {
+        return TokenUsage::default();
+    };
+    TokenUsage {
+        prompt_tokens: usage
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        completion_tokens: usage
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+    }
+}
+
+fn build_client(loopback_only: bool) -> CordonResult<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .connect_timeout(Duration::from_secs(10));
+
+    if loopback_only {
+        // A loopback runtime must never be reached through a proxy; that would
+        // route prompt plaintext off the machine.
+        builder = builder.no_proxy();
+    }
+
+    builder
+        .build()
+        .map_err(|e| CordonError::Internal(format!("cannot build runtime HTTP client: {}", e)))
+}
+
+/// Whether a URL points at the local machine.
+pub fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_loopback_urls() {
+        assert!(is_loopback_url("http://127.0.0.1:8080"));
+        assert!(is_loopback_url("http://localhost:8080/v1"));
+        assert!(is_loopback_url("http://[::1]:8080"));
+        assert!(!is_loopback_url("http://10.0.0.5:8080"));
+        assert!(!is_loopback_url("https://api.example.com"));
+        assert!(!is_loopback_url("not a url"));
+    }
+
+    #[test]
+    fn splits_sse_records_on_blank_lines() {
+        let mut buf = String::from("data: {\"a\":1}\n\ndata: [DONE]\n\n");
+        assert_eq!(take_event(&mut buf).unwrap(), "data: {\"a\":1}");
+        assert_eq!(take_event(&mut buf).unwrap(), "data: [DONE]");
+        assert!(take_event(&mut buf).is_none());
+    }
+
+    #[test]
+    fn holds_partial_records_until_complete() {
+        let mut buf = String::from("data: {\"par");
+        assert!(take_event(&mut buf).is_none());
+        buf.push_str("tial\":true}\n\n");
+        assert_eq!(take_event(&mut buf).unwrap(), "data: {\"partial\":true}");
+    }
+
+    #[test]
+    fn extracts_deltas_and_finish_reason() {
+        let mut state = SseState::default();
+        let event = r#"data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}"#;
+        match parse_sse_event(event, &mut state) {
+            SseOutcome::Chunk(StreamChunk::Delta(d)) => assert_eq!(d, "hello"),
+            _ => panic!("expected a delta"),
+        }
+
+        let event = r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#;
+        assert!(matches!(
+            parse_sse_event(event, &mut state),
+            SseOutcome::Continue
+        ));
+        assert_eq!(state.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn records_usage_from_stream() {
+        let mut state = SseState::default();
+        let event = r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":11}}"#;
+        let _ = parse_sse_event(event, &mut state);
+        assert_eq!(state.usage.prompt_tokens, 7);
+        assert_eq!(state.usage.completion_tokens, 11);
+    }
+
+    #[test]
+    fn done_sentinel_terminates() {
+        let mut state = SseState::default();
+        assert!(matches!(
+            parse_sse_event("data: [DONE]", &mut state),
+            SseOutcome::Finished
+        ));
+        assert!(state.terminated);
+    }
+
+    /// The regression this decoder exists to prevent: a character split across
+    /// two TCP reads must arrive whole, not truncated and not mangled.
+    #[test]
+    fn a_character_split_across_reads_is_reassembled() {
+        let source = "日本語のテキスト";
+        let bytes = source.as_bytes();
+
+        // Split at every byte offset, including the ones mid-character.
+        for split in 1..bytes.len() {
+            let mut pending = Vec::new();
+            let mut text = String::new();
+
+            pending.extend_from_slice(&bytes[..split]);
+            decode_utf8_prefix(&mut pending, &mut text);
+            pending.extend_from_slice(&bytes[split..]);
+            decode_utf8_prefix(&mut pending, &mut text);
+
+            assert_eq!(text, source, "corrupted when split at byte {}", split);
+            assert!(pending.is_empty(), "bytes left over at split {}", split);
+        }
+    }
+
+    #[test]
+    fn an_incomplete_trailing_character_is_held_not_dropped() {
+        let mut pending = vec![0xE6, 0x97]; // first two bytes of '日'
+        let mut text = String::new();
+        decode_utf8_prefix(&mut pending, &mut text);
+        assert_eq!(text, "");
+        assert_eq!(pending, vec![0xE6, 0x97]);
+
+        pending.push(0xA5);
+        decode_utf8_prefix(&mut pending, &mut text);
+        assert_eq!(text, "日");
+        assert!(pending.is_empty());
+    }
+
+    /// Invalid bytes must be consumed rather than held, or a malformed stream
+    /// would stall the decoder for the rest of the response.
+    #[test]
+    fn invalid_bytes_do_not_wedge_the_decoder() {
+        let mut pending = vec![b'a', 0xFF, 0xFE, b'b'];
+        let mut text = String::new();
+        decode_utf8_prefix(&mut pending, &mut text);
+        assert!(pending.is_empty());
+        assert!(text.starts_with('a') && text.ends_with('b'));
+    }
+
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let s = "aaaé";
+        let out = truncate(s, 4);
+        assert!(out.is_char_boundary(out.len() - '…'.len_utf8()));
+    }
+
+    fn supervised_over(model_path: &str) -> OpenAiBackend {
+        use super::super::supervisor::LlamaRuntimeConfig;
+
+        let supervisor = Arc::new(LlamaSupervisor::detached(LlamaRuntimeConfig::new(
+            std::path::PathBuf::from("/usr/bin/llama-server"),
+            std::path::PathBuf::from(model_path),
+        )));
+        OpenAiBackend::supervised(supervisor).unwrap()
+    }
+
+    /// The regression this guards: health output reported no model at all until
+    /// the first request arrived, and reported the identifier that request
+    /// carried thereafter. The console labels the field "Model loaded", so a
+    /// client's choice of name was being presented as the runtime's state.
+    #[tokio::test]
+    async fn a_supervised_runtime_names_its_model_before_any_request() {
+        let backend = supervised_over("data/models/smollm2-360m-instruct-q8_0.gguf");
+        assert_eq!(
+            backend.loaded_model().await.as_deref(),
+            Some("smollm2-360m-instruct-q8_0")
+        );
+    }
+
+    /// Whatever a client asks for, the supervised runtime has one model open
+    /// and reporting anything else would be a guess dressed as a fact.
+    #[tokio::test]
+    async fn a_client_cannot_rename_the_supervised_model() {
+        let backend = supervised_over("data/models/smollm2-360m-instruct-q8_0.gguf");
+        *backend.last_model.write() = Some("default".to_string());
+        assert_eq!(
+            backend.loaded_model().await.as_deref(),
+            Some("smollm2-360m-instruct-q8_0")
+        );
+    }
+
+    /// Cordon did not spawn an external endpoint and cannot ask it what it
+    /// loaded, so before the first request there is nothing to report. Saying
+    /// nothing is the honest answer; inventing one is not.
+    #[tokio::test]
+    async fn an_external_endpoint_reports_nothing_until_a_request_names_a_model() {
+        let backend = OpenAiBackend::external("http://127.0.0.1:8000".into(), None).unwrap();
+        assert_eq!(backend.loaded_model().await, None);
+
+        *backend.last_model.write() = Some("llama-3-8b".to_string());
+        assert_eq!(backend.loaded_model().await.as_deref(), Some("llama-3-8b"));
+    }
+}

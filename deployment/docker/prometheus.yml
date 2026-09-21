@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "cordon"
+    # Cordon serves /metrics only to a loopback peer. This Prometheus shares the
+    # node's network namespace (see docker-compose.yml), so 127.0.0.1 is the
+    # node itself.
+    static_configs:
+      - targets: ["127.0.0.1:8443"]
+    metrics_path: "/metrics"
+    scheme: http
