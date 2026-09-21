@@ -11,7 +11,7 @@ resolver = "2"
 [workspace.package]
 version = "2.0.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/cordon-project/cordon"
 homepage = "https://github.com/cordon-project/cordon"
@@ -23,7 +23,7 @@ categories = ["cryptography", "network-programming"]
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-anyhow = "1.0"
+anyhow = "1.0.103"
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -46,17 +46,17 @@ axum = { version = "0.7", features = ["json", "macros"] }
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.5", features = ["trace", "cors", "timeout", "limit", "set-header"] }
 hyper = { version = "1.0", features = ["full"] }
-rustls = "0.22"
-tokio-rustls = "0.25"
-rustls-pemfile = "2.0"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pki-types = { version = "1.15", features = ["std"] }
 rcgen = "0.12"
 config = "0.13"
 toml = "0.8"
 dirs = "5.0"
 parking_lot = "0.12"
 dashmap = "5.5"
-prometheus = { version = "0.13", features = ["process"] }
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"], default-features = false }
+prometheus = { version = "0.14", features = ["process"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 tempfile = "3.9"
 regex = "1.10"
 futures = "0.3"
@@ -65,7 +65,7 @@ x509-parser = "0.16"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 eventsource-stream = "0.2"
-indicatif = "0.17"
+indicatif = "0.18"
 url = "2.5"
 
 [profile.release]
@@ -79,5 +79,3 @@ strip = "symbols"
 inherits = "release"
 strip = "none"
 debug = true
-
-

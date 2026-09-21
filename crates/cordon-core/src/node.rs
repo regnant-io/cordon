@@ -1096,7 +1096,7 @@ impl CordonNode {
             return Err(CordonError::AuthFailed("source is blocked".into()));
         }
 
-        let policy = self.identity.verify(client).map_err(|e| {
+        let policy = self.identity.verify(client).inspect_err(|_| {
             self.metrics.auth_failures_total.inc();
             self.attack_detector
                 .record_auth_failure(&client.fingerprint);
@@ -1107,7 +1107,6 @@ impl CordonNode {
                 cordon_audit::events::AutoAction::Continue,
                 Some(client.fingerprint.clone()),
             );
-            e
         })?;
 
         if let Some(reason) = self.attack_detector.is_client_suspended(&client.client_id) {
@@ -1142,9 +1141,8 @@ impl CordonNode {
 
         self.rate_limiter
             .check(&client.client_id, params.max_tokens, &policy)
-            .map_err(|e| {
+            .inspect_err(|_| {
                 self.metrics.rate_limit_hits_total.inc();
-                e
             })?;
 
         Ok(policy)

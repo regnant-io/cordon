@@ -947,7 +947,7 @@ impl CordonConfig {
                 // PCR0 identifies the enclave image. A chain to the AWS root
                 // without it says "some genuine Nitro enclave", which is not
                 // the same as "the enclave you built".
-                if pins.map_or(true, |n| !n.pcr_values.contains_key(&0)) {
+                if pins.is_none_or(|n| !n.pcr_values.contains_key(&0)) {
                     return Err(CordonError::ConfigError(format!(
                         "attestation.measurement_source = \"nitro_enclave\" in {} mode                          requires a pinned PCR0 under                          [attestation.expected.nitro.pcr_values]. Without it the                          attestation establishes that some genuine Nitro enclave                          answered, not that yours did.",
                         self.mode

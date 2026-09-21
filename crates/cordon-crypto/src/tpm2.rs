@@ -379,9 +379,9 @@ impl TpmPublicKey {
                 let y = r.sized_buffer("unique.y")?;
                 let mut point = Vec::with_capacity(65);
                 point.push(0x04);
-                point.extend(std::iter::repeat(0).take(32usize.saturating_sub(x.len())));
+                point.extend(std::iter::repeat_n(0, 32usize.saturating_sub(x.len())));
                 point.extend_from_slice(x);
-                point.extend(std::iter::repeat(0).take(32usize.saturating_sub(y.len())));
+                point.extend(std::iter::repeat_n(0, 32usize.saturating_sub(y.len())));
                 point.extend_from_slice(y);
 
                 Ok(TpmPublicKey::EcP256 { point })

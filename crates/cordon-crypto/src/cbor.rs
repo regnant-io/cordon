@@ -643,7 +643,7 @@ mod tests {
         // A flat run of empty arrays would be cheap to decode individually;
         // the item counter is what stops a document made of millions of them.
         let mut bytes = vec![0x9A, 0x00, 0x00, 0x10, 0x01]; // array(4097)
-        bytes.extend(std::iter::repeat(0x80).take(4097));
+        bytes.extend(std::iter::repeat_n(0x80, 4097));
         let error = decode(&bytes).unwrap_err().to_string();
         assert!(error.contains("more than"), "{}", error);
     }

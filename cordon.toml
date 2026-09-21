@@ -1,0 +1,94 @@
+mode = "vault"
+node_id = "vault-node-01"
+deployment_name = "vault-deployment"
+deployment_id = "vault-deployment-id-12345"
+client_registry_path = "etc/cordon/clients.json"
+log_level = "info"
+
+[network]
+outbound_policy = "zero_egress"
+bind_address = "127.0.0.1"
+api_port = 8443
+tls_cert_path = "etc/cordon/tls/server.crt"
+tls_key_path = "etc/cordon/tls/server.key"
+client_ca_path = "etc/cordon/tls/client-ca.crt"
+require_mtls = true
+
+[tee]
+preferred = "amd_sev_snp"
+minimum_security_version = 3
+
+[side_channel.timing_normalization]
+enabled = true
+mode = "bucket"
+bucket_ms = 100
+fixed_floor_ms = 500
+
+[hsm]
+fips_level = 3
+
+[boot]
+tpm_required = true
+tpm_version = "2.0"
+secure_boot = false
+dm_verity = false
+
+[model_store]
+path = "data/bundles"
+integrity_check_interval_minutes = 15
+halt_on_tamper = true
+
+[inference]
+max_concurrent_requests = 32
+default_timeout_seconds = 120
+kv_cache_zero_on_session_end = true
+multi_tenant = true
+max_output_tokens = 4096
+
+[audit]
+log_path = "data/audit"
+
+[sustained_attack]
+auth_failure_threshold_per_minute = 10
+global_failure_threshold_per_minute = 50
+covert_channel_score_threshold = 0.699999988079071
+replay_probe_threshold = 20
+
+[runtime]
+backend = "supervised"
+model_path = "smollm2-360m"
+model_dir = "data/models"
+context_size = 4096
+gpu_layers = 0
+parallel_slots = 4
+startup_timeout_seconds = 180
+extra_args = []
+
+[ui]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8478
+
+[attestation]
+measurement_source = "tpm2"
+interval_hours = 24
+halt_until_verified = true
+
+[limits]
+max_request_bytes = 1048576
+max_messages = 256
+max_prompt_chars = 262144
+max_connections = 1024
+tls_handshake_timeout_seconds = 15
+
+[content_policy]
+default_path = "etc/cordon/policy.json"
+
+[attestation.expected]
+mrenclave = "0000000000000000000000000000000000000000000000000000000000000000"
+mrsigner = "0000000000000000000000000000000000000000000000000000000000000000"
+min_isv_svn = 0
+
+[attestation.expected.pcr_values]
+# Use a simple list or remove these if not supported by the TOML parser in this version
+# For now, I'll just leave it empty to see if it boots.

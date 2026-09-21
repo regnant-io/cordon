@@ -490,7 +490,7 @@ impl ExpectedMeasurements {
         let nitro_pins_nothing = self
             .nitro
             .as_ref()
-            .map_or(true, |pins| pins.pcr_values.is_empty());
+            .is_none_or(|pins| pins.pcr_values.is_empty());
         self.pcr_values.is_empty()
             && self.mrenclave.is_empty()
             && self.mrsigner.is_empty()

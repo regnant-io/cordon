@@ -15,7 +15,6 @@
 //! cleanup on drop. Without those, opening sockets and never completing a
 //! handshake is enough to exhaust the process.
 
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +27,7 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use hyper_util::service::TowerToHyperService;
+use rustls_pki_types::pem::PemObject;
 use tokio::sync::Semaphore;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
@@ -328,9 +328,8 @@ fn build_rustls_server_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
 
 /// Load a PEM certificate chain.
 fn load_certs(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_file_iter(path)
+        .context("opening the PEM certificate file")?
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("parsing PEM certificates")?;
     if certs.is_empty() {
@@ -341,9 +340,6 @@ fn load_certs(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
 
 /// Load a PEM private key (PKCS#8, PKCS#1, or SEC1).
 fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .context("parsing the PEM private key")?
-        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))
+    PrivateKeyDer::from_pem_file(path)
+        .with_context(|| format!("parsing the PEM private key {}", path.display()))
 }

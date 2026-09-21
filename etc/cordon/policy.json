@@ -1,0 +1,9 @@
+{
+  "rules": [
+    {
+      "name": "default-pii",
+      "action": "redact",
+      "pattern": "pii"
+    }
+  ]
+}

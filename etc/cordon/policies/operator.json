@@ -1,0 +1,9 @@
+{
+  "rules": [
+    {
+      "name": "no-pii",
+      "action": "redact",
+      "pattern": "pii"
+    }
+  ]
+}

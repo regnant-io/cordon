@@ -1,0 +1,15 @@
+[
+  {
+    "client_id": "operator",
+    "active": true,
+    "permitted_models": ["smollm2-360m"],
+    "max_tokens_per_request": 4096,
+    "max_requests_per_minute": 100,
+    "max_tokens_per_minute": 100000,
+    "admin_allowed": true,
+    "log_export_allowed": true,
+    "policy_expires_at": null,
+    "cert_pins": [],
+    "content_policy_path": "etc/cordon/policies/operator.json"
+  }
+]
