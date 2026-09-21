@@ -1,0 +1,3868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Cordon · Operator Console</title>
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAtElEQVR42mN4+/oxTREDnSy4dvXsqpWLqIgePriBYgFQSEVViYro9KlDA2TB+nUrgHJko8mTewlYAJcgD2GaM7wtIDLtwlMkyRYQmbSwahlkFmBNu5gpknwLgILPn907dfEYHAG5BLWQZgHQULlACzgCckctoLcFNI9kYkqFUQvQELCMg2Tp50/vEraASNXkF9dEqh6yFgALTiKbQ7W15eRYQIVmy8BYAE9aZCB4amQY8q1rAGe6ACcatqU8AAAAAElFTkSuQmCC">
+<script>
+/* Both of these decide layout, and both are stored rather than derived, so
+   they have to be on the root element before the first paint. The main
+   script reads them again; this only spares the operator a page that lays
+   itself out once with the wrong rail and then jumps. */
+(function () {
+  var root = document.documentElement;
+  function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+  var theme = stored('cordon.theme');
+  if (theme === 'dark' || theme === 'light') root.setAttribute('data-theme', theme);
+  var drawer  = matchMedia('(max-width: 760px)').matches;
+  var cramped = matchMedia('(max-width: 1180px)').matches;
+  root.setAttribute('data-rail',
+    !drawer && (cramped || stored('cordon.rail') === 'mini') ? 'mini' : 'wide');
+})();
+</script>
+<style>
+/* ===========================================================================
+   CORDON CONSOLE - DESIGN SYSTEM
+   ---------------------------------------------------------------------------
+   An instrument for an operator who has to decide whether to trust a node.
+   Three rules hold the whole system together:
+
+   1. COLOUR IS EVIDENCE. The interaction accent (iris) is structural only:
+      focus, selection, links, the active nav item. It never means "good".
+      Jade / amber / crimson are reserved for verdicts about the node, so a
+      coloured pixel always answers a question about trust, never about taste.
+
+   2. NUMBERS ARE MONOSPACE AND TABULAR. Every measured value sits on the same
+      grid across every poll, so a digit changing reads as movement rather
+      than as reflow.
+
+   3. NOTHING IS FETCHED. No webfonts, no icon CDN, no remote anything. The
+      console must render identically on an air-gapped host, and a page that
+      phones home also announces that a Cordon deployment exists. The type
+      stacks are written against what machines actually have, and every metric
+      below is tuned against the fallbacks rather than against an ideal.
+   =========================================================================== */
+
+:root {
+  /* -- Type -------------------------------------------------------------- */
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono",
+          "Cascadia Mono", "Cascadia Code", Menlo, Consolas,
+          "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --sans: "Archivo", "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue",
+          "Noto Sans", Arial, sans-serif;
+
+  --fs-micro: 10.5px;
+  --fs-tiny:  11.5px;
+  --fs-sm:    12.5px;
+  --fs-base:  13.5px;
+  --fs-md:    15px;
+  --fs-lg:    19px;
+  --fs-xl:    26px;
+  --fs-2xl:   32px;
+
+  --track-label: .09em;
+
+  /* -- Space (4px base) -------------------------------------------------- */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 20px;
+  --s6: 24px; --s7: 28px; --s8: 32px; --s10: 40px; --s12: 48px; --s16: 64px;
+
+  /* -- Radii - square, like the source palette --------------------------- */
+  --r1: 0; --r2: 0; --r3: 0; --r4: 0; --r-pill: 999px;
+
+  /* -- Motion ------------------------------------------------------------ */
+  --dur1: 110ms; --dur2: 170ms; --dur3: 260ms;
+  --ease: cubic-bezier(.2,.65,.25,1);
+  --ease-out: cubic-bezier(.16,1,.3,1);
+
+  /* -- Shell metrics ----------------------------------------------------- */
+  --rail-w: 238px;
+  --rail-mini: 60px;
+  --rail-col: var(--rail-w);
+  --topbar-h: 52px;
+  --statusbar-h: 30px;
+  --page-max: 1500px;
+  --pad: clamp(16px, 2.2vw, 28px);
+
+  /* -- Layers -------------------------------------------------------------
+     One ordered scale for everything that stacks. The only z-index bug worth
+     naming is the one where something meant to be reachable ends up beneath
+     its own backdrop, and that is far easier to see in a list than in eight
+     numbers scattered over three thousand lines. */
+  --z-sticky:      2;   /* a table head inside a scrolling panel */
+  --z-inspector:  20;   /* the inspector, folded over the transcript */
+  --z-topbar:     50;
+  --z-rail:       60;   /* docked, so it is simply part of the frame */
+  --z-scrim:      90;
+  --z-drawer:     95;   /* off canvas, so it must clear the scrim it raises */
+  --z-palette:   100;
+  --z-toast:     300;
+  --z-skip:      400;
+
+  /* -- Palette: Paper ---------------------------------------------------- */
+  /* Adapted from regnant.io: a warm paper ground, graphite ink, hairline
+     rules, and exactly one saturated colour. Moss green is reserved for
+     things this node has actually proven; ochre for the unproven; rust for
+     the broken. Nothing else in the interface is allowed to be chromatic. */
+  color-scheme: light;
+
+  --bg:          #EDEBE3;
+  --bg-sunken:   #E3E0D6;
+  --surface:     #F7F6F1;
+  --surface-2:   #EDEBE3;
+  --surface-3:   #E2DFD5;
+
+  --line:        #CBC9C0;
+  --line-strong: #B3B1A6;
+  --line-soft:   #DEDCD3;
+
+  --text:        #242522;
+  --text-2:      #55584C;
+  --text-3:      #7C7E71;
+  --text-inv:    #F2F0E9;
+
+  --accent:      #1E5138;
+  --accent-hi:   #163C29;
+  --accent-soft: #E1EAE3;
+  --accent-line: #B9D4C1;
+  --on-accent:   #F2F0E9;
+
+  --jade:        #1E5138;
+  --jade-soft:   #E1EAE3;
+  --jade-line:   #B9D4C1;
+
+  --amber:       #7E5312;
+  --amber-soft:  #EFE8D6;
+  --amber-line:  #D3BE93;
+
+  --crimson:     #B3261E;
+  --crimson-soft:#F2E2DF;
+  --crimson-line:#DCB2AC;
+
+  --neutral-soft:#E6E3DA;
+  --neutral-line:#CBC9C0;
+
+  /* Paper is held together by rules, not by lift. Shadows appear only where
+     something genuinely floats above the page. */
+  --shadow-1: 0 1px 0 rgba(36,37,34,.05);
+  --shadow-2: 0 2px 10px -3px rgba(36,37,34,.12);
+  --shadow-3: 0 18px 44px -14px rgba(36,37,34,.30), 0 4px 12px -8px rgba(36,37,34,.16);
+
+  --scrim: rgba(36,37,34,.46);
+}
+
+/* -- Palette: Ink -------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --bg:          #1B1C19;
+    --bg-sunken:   #151613;
+    --surface:     #242522;
+    --surface-2:   #2A2B27;
+    --surface-3:   #32332E;
+
+    --line:        #3A3B35;
+    --line-strong: #53554C;
+    --line-soft:   #2E2F2A;
+
+    --text:        #F2F0E9;
+    --text-2:      #A4A698;
+    --text-3:      #7D7F72;
+    --text-inv:    #1B1C19;
+
+    --accent:      #7FB894;
+    --accent-hi:   #9BC2A8;
+    --accent-soft: #1C2A22;
+    --accent-line: #35513F;
+    --on-accent:   #14170F;
+
+    --jade:        #7FB894;
+    --jade-soft:   #1C2A22;
+    --jade-line:   #35513F;
+
+    --amber:       #D9A85C;
+    --amber-soft:  #2B2415;
+    --amber-line:  #574726;
+
+    --crimson:     #FF6B5E;
+    --crimson-soft:#2E1C19;
+    --crimson-line:#5C332D;
+
+    --neutral-soft:#2A2B27;
+    --neutral-line:#3E3F39;
+
+    --shadow-1: 0 1px 0 rgba(0,0,0,.40);
+    --shadow-2: 0 4px 14px -4px rgba(0,0,0,.60);
+    --shadow-3: 0 22px 52px -14px rgba(0,0,0,.78), 0 6px 18px -10px rgba(0,0,0,.60);
+
+    --scrim: rgba(12,13,11,.68);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg:          #1B1C19;
+  --bg-sunken:   #151613;
+  --surface:     #242522;
+  --surface-2:   #2A2B27;
+  --surface-3:   #32332E;
+
+  --line:        #3A3B35;
+  --line-strong: #53554C;
+  --line-soft:   #2E2F2A;
+
+  --text:        #F2F0E9;
+  --text-2:      #A4A698;
+  --text-3:      #7D7F72;
+  --text-inv:    #1B1C19;
+
+  --accent:      #7FB894;
+  --accent-hi:   #9BC2A8;
+  --accent-soft: #1C2A22;
+  --accent-line: #35513F;
+  --on-accent:   #14170F;
+
+  --jade:        #7FB894;
+  --jade-soft:   #1C2A22;
+  --jade-line:   #35513F;
+
+  --amber:       #D9A85C;
+  --amber-soft:  #2B2415;
+  --amber-line:  #574726;
+
+  --crimson:     #FF6B5E;
+  --crimson-soft:#2E1C19;
+  --crimson-line:#5C332D;
+
+  --neutral-soft:#2A2B27;
+  --neutral-line:#3E3F39;
+
+  --shadow-1: 0 1px 0 rgba(0,0,0,.40);
+  --shadow-2: 0 4px 14px -4px rgba(0,0,0,.60);
+  --shadow-3: 0 22px 52px -14px rgba(0,0,0,.78), 0 6px 18px -10px rgba(0,0,0,.60);
+
+  --scrim: rgba(12,13,11,.68);
+}
+
+/* === Reset ================================================================ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+
+body {
+  font-family: var(--sans);
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* Every component below sets its own `display`, which would otherwise beat the
+   user-agent rule for `[hidden]` and leave "hidden" elements on screen. The
+   attribute is how this page hides things, so it wins outright. */
+[hidden] { display: none !important; }
+
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: none; cursor: pointer; color: inherit; }
+svg { display: block; flex: none; }
+a { color: var(--accent); text-underline-offset: 2px; }
+
+/* One focus treatment everywhere. Keyboard operators are first-class here:
+   the console has no password, so the keyboard is the only fast path in. */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r1); }
+
+::selection { background: var(--accent-soft); color: var(--text); }
+
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-pill);
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--text-3); background-clip: content-box; }
+
+.skip {
+  position: fixed; inset-inline-start: var(--s2); top: var(--s2); z-index: var(--z-skip);
+  transform: translateY(-250%);
+  background: var(--accent); color: var(--on-accent);
+  padding: var(--s2) var(--s4); border-radius: var(--r2);
+  font-size: var(--fs-sm); font-weight: 600;
+  transition: transform var(--dur2) var(--ease);
+}
+.skip:focus { transform: translateY(0); }
+
+.vh {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+/* === Typographic primitives =============================================== */
+
+.mono, .num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The micro-label opens every field, table header and region title. Used
+   consistently, it is what makes the density read as deliberate rather than
+   as cramped. */
+.label {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  display: flex; align-items: center; gap: var(--s2);
+}
+/* The identity tick: a 3px accent square opening every titled region. */
+.eyebrow::before { content: ""; width: 3px; height: 3px; flex: none; background: var(--accent); }
+
+.prose { color: var(--text-2); font-size: var(--fs-base); line-height: 1.6; max-width: 70ch; }
+.prose strong { color: var(--text); font-weight: 600; }
+.prose + .prose { margin-top: var(--s3); }
+
+.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.spacer { flex: 1 1 auto; min-width: 0; }
+
+/* === App shell ============================================================
+   A fixed three-region frame: an identity rail on the left, a command bar
+   across the top, and exactly one scrolling region. Labels never scroll away
+   from the measurements they label, which is the whole argument for a shell
+   rather than a long page.
+   ========================================================================= */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-col) minmax(0, 1fr);
+  height: 100dvh;
+}
+
+/* -- Rail ---------------------------------------------------------------- */
+
+.rail {
+  grid-row: 1;
+  display: flex; flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  z-index: var(--z-rail);
+}
+
+.brand {
+  display: flex; align-items: center; gap: var(--s3);
+  height: var(--topbar-h);
+  padding: 0 var(--s4);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.brand-mark {
+  width: 24px; height: 24px; flex: none;
+  display: grid; place-items: center;
+  color: var(--text);
+}
+.brand-mark svg { width: 24px; height: 24px; }
+/* The one saturated pixel in the mark, for the one thing the perimeter is
+   there to hold. */
+.brand-core { fill: var(--accent); }
+.brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.brand-name {
+  font-family: var(--mono);
+  font-size: 13px; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase;
+  line-height: 1;
+}
+.brand-sub {
+  font-size: 10px; color: var(--text-3);
+  letter-spacing: .04em; line-height: 1;
+}
+
+.rail-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--s4) 0 var(--s6); }
+
+.nav-group { padding: 0 var(--s3); }
+.nav-group + .nav-group { margin-top: var(--s5); }
+.nav-group > .label { padding: 0 var(--s3) var(--s2); display: block; }
+
+.nav-item {
+  position: relative;
+  display: flex; align-items: center; gap: var(--s3);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r2);
+  font-size: var(--fs-base);
+  font-weight: 450;
+  color: var(--text-2);
+  text-align: left;
+  transition: background var(--dur1) var(--ease), color var(--dur1) var(--ease);
+}
+.nav-item svg { width: 16px; height: 16px; color: var(--text-3); transition: color var(--dur1) var(--ease); }
+.nav-item:hover { background: var(--surface-3); color: var(--text); }
+.nav-item:hover svg { color: var(--text-2); }
+.nav-item[aria-current="page"] { background: var(--accent-soft); color: var(--text); font-weight: 550; }
+.nav-item[aria-current="page"] svg { color: var(--accent); }
+/* The active marker sits in the rail gutter, so it reads as a position in a
+   list rather than as a highlight on a button. */
+.nav-item[aria-current="page"]::before {
+  content: ""; position: absolute; left: calc(var(--s3) * -1 - 1px); top: 50%;
+  transform: translateY(-50%);
+  width: 2px; height: 18px; border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+.nav-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A count or a state dot riding the nav item: the operator sees a broken
+   chain from any view. */
+.nav-tag {
+  font-family: var(--mono); font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  padding: 1px var(--s1); border-radius: var(--r1);
+  background: var(--neutral-soft);
+}
+.nav-tag[data-tone="stop"]  { color: var(--crimson); background: var(--crimson-soft); }
+.nav-tag[data-tone="warn"]  { color: var(--amber);   background: var(--amber-soft); }
+.nav-tag[data-tone="ok"]    { color: var(--jade);    background: var(--jade-soft); }
+
+.rail-foot {
+  flex: none;
+  border-top: 1px solid var(--line);
+  padding: var(--s3);
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+
+/* The palette hint doubles as the button that opens it, and the fold button
+   is its quieter sibling: same shape, no chrome until it is wanted. */
+.cmd-hint,
+.rail-collapse {
+  display: flex; align-items: center; gap: var(--s2);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  transition: border-color var(--dur1) var(--ease), color var(--dur1) var(--ease);
+}
+.cmd-hint:hover { border-color: var(--line-strong); color: var(--text-2); }
+.cmd-hint svg, .rail-collapse svg { width: 14px; height: 14px; }
+
+.rail-collapse { border-color: transparent; background: none; }
+.rail-collapse:hover { border-color: var(--line); color: var(--text-2); }
+.rail-collapse svg { transition: transform var(--dur2) var(--ease); }
+/* The chevron points the way the rail will move, not the way it sits. */
+:root[data-rail="mini"] .rail-collapse svg { transform: scaleX(-1); }
+
+/* -- Mini rail ------------------------------------------------------------
+   The rail folds to its icons for two different reasons: the operator folded
+   it, or the viewport dropped below the width where a 238px navigation
+   column still earns its place. Both set `data-rail` on the root, so the
+   folded rail is described once here instead of once per breakpoint. */
+
+:root[data-rail="mini"] { --rail-col: var(--rail-mini); }
+:root[data-rail="mini"] .brand { padding: 0; justify-content: center; }
+:root[data-rail="mini"] .brand-text,
+:root[data-rail="mini"] .nav-label,
+:root[data-rail="mini"] .nav-tag,
+:root[data-rail="mini"] .nav-group > .label,
+:root[data-rail="mini"] .cmd-hint span,
+:root[data-rail="mini"] .cmd-hint kbd,
+:root[data-rail="mini"] .rail-collapse span { display: none; }
+:root[data-rail="mini"] .nav-item { justify-content: center; padding: var(--s2); }
+:root[data-rail="mini"] .nav-item[aria-current="page"]::before { left: -13px; }
+:root[data-rail="mini"] .nav-group { padding: 0 var(--s2); }
+:root[data-rail="mini"] .nav-group + .nav-group {
+  margin-top: var(--s3); position: relative; padding-top: var(--s3);
+}
+:root[data-rail="mini"] .nav-group + .nav-group::before {
+  content: ""; position: absolute; top: 0; left: var(--s3); right: var(--s3);
+  height: 1px; background: var(--line);
+}
+:root[data-rail="mini"] .cmd-hint,
+:root[data-rail="mini"] .rail-collapse { justify-content: center; padding: var(--s2); }
+:root[data-rail="mini"] .rail-foot { padding: var(--s2); }
+
+kbd {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  line-height: 1;
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: var(--r1);
+  background: var(--surface);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* -- Main column --------------------------------------------------------- */
+
+.main {
+  display: grid;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--statusbar-h);
+  min-width: 0; min-height: 0;
+  background: var(--bg);
+}
+
+.topbar {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: 0 var(--pad);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  min-width: 0;
+  z-index: var(--z-topbar);
+}
+
+.crumbs { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.crumb-sep { color: var(--text-3); font-size: var(--fs-sm); }
+.crumb-current { font-size: var(--fs-base); font-weight: 600; letter-spacing: -.01em; }
+
+.topbar-tools { display: flex; align-items: center; gap: var(--s2); flex: none; }
+
+/* The connection pip. A console that has quietly stopped polling looks
+   identical to a healthy one unless something says so. */
+.pip {
+  display: flex; align-items: center; gap: var(--s2);
+  font-family: var(--mono); font-size: var(--fs-micro);
+  letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-3);
+  padding: var(--s1) var(--s2);
+  border-radius: var(--r2);
+}
+.pip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex: none; }
+.pip[data-state="live"]    { color: var(--jade); }
+.pip[data-state="live"] .pip-dot { background: var(--jade); animation: pulse 2.4s var(--ease) infinite; }
+.pip[data-state="stale"]   { color: var(--amber); }
+.pip[data-state="stale"] .pip-dot { background: var(--amber); }
+.pip[data-state="offline"] { color: var(--crimson); }
+.pip[data-state="offline"] .pip-dot { background: var(--crimson); }
+
+/* When the node stops answering, the measurements on screen are the last
+   known truth rather than the current one. They recede instead of being
+   cleared: stale evidence is still evidence, but it should not be read as
+   live. */
+:root[data-conn="offline"] .stat-value,
+:root[data-conn="offline"] .readout dd,
+:root[data-conn="offline"] .spark,
+:root[data-conn="offline"] .meter { opacity: .5; transition: opacity var(--dur3) var(--ease); }
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(61,217,164,.5); }
+  50%      { box-shadow: 0 0 0 4px rgba(61,217,164,0); }
+}
+
+.icon-btn {
+  width: 30px; height: 30px; flex: none;
+  display: grid; place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--r2);
+  color: var(--text-2);
+  transition: background var(--dur1) var(--ease), color var(--dur1) var(--ease),
+              border-color var(--dur1) var(--ease);
+}
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn:hover { background: var(--surface-3); color: var(--text); }
+.icon-btn[aria-pressed="true"] { border-color: var(--line); background: var(--surface-3); color: var(--text); }
+
+.rail-toggle { display: none; }
+
+/* -- Scroll region ------------------------------------------------------- */
+
+.viewport { min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { .viewport { scroll-behavior: auto; } }
+
+.view { display: none; }
+.view[data-active] { display: block; }
+/* Panels arrive with a short rise. Long enough to show which region changed,
+   short enough that a fast operator never waits on it. */
+.view[data-active] > * { animation: rise var(--dur3) var(--ease-out) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Views that own their own scrolling (the inference console) opt out. */
+.view--fill { height: 100%; }
+.view--fill[data-active] { display: flex; flex-direction: column; min-height: 0; }
+.viewport:has(.view--fill[data-active]) { overflow: hidden; }
+
+.page { max-width: var(--page-max); margin: 0 auto; padding: var(--s6) var(--pad) var(--s12); }
+
+/* -- Page header --------------------------------------------------------- */
+
+.page-head {
+  display: flex; align-items: flex-start; gap: var(--s5);
+  flex-wrap: wrap;
+  padding-bottom: var(--s5);
+  margin-bottom: var(--s6);
+  border-bottom: 1px solid var(--line);
+}
+.page-head-text { min-width: 280px; flex: 1 1 420px; }
+.page-title {
+  font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.018em;
+  line-height: 1.25; margin-top: var(--s2);
+}
+.page-desc { margin-top: var(--s2); color: var(--text-2); font-size: var(--fs-base); max-width: 72ch; line-height: 1.55; }
+.page-actions { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+
+/* -- Status bar ---------------------------------------------------------- */
+
+.statusbar {
+  display: flex; align-items: center; gap: var(--s4);
+  padding: 0 var(--pad);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: .04em;
+  color: var(--text-3);
+  overflow-x: auto; overflow-y: hidden;
+  white-space: nowrap;
+}
+.statusbar b { font-weight: 500; color: var(--text-2); }
+.status-cell { display: flex; align-items: center; gap: var(--s2); flex: none; }
+.status-rule { width: 1px; height: 12px; background: var(--line); flex: none; }
+
+/* === Layout grid ==========================================================
+   One 12-column grid for every dashboard. Spans collapse at two breakpoints
+   only, so a panel is either at its designed width, at half of it, or full
+   width - never at an arbitrary in-between that nobody laid out.
+   ========================================================================= */
+
+.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--s4); }
+.grid + .grid { margin-top: var(--s4); }
+.col-3  { grid-column: span 3; }
+.col-4  { grid-column: span 4; }
+.col-5  { grid-column: span 5; }
+.col-6  { grid-column: span 6; }
+.col-7  { grid-column: span 7; }
+.col-8  { grid-column: span 8; }
+.col-12 { grid-column: span 12; }
+
+.stack { display: flex; flex-direction: column; gap: var(--s4); }
+.row   { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+
+/* === Panel ================================================================ */
+
+.panel {
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r3);
+  box-shadow: var(--shadow-1);
+  min-width: 0;
+  overflow: hidden;
+}
+.panel-head {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  min-height: 44px;
+  flex: none;
+}
+.panel-title { font-size: var(--fs-sm); font-weight: 600; letter-spacing: -.005em; }
+.panel-head .eyebrow { flex: none; }
+.panel-tools { display: flex; align-items: center; gap: var(--s2); flex: none; margin-left: auto; }
+.panel-body { padding: var(--s4); flex: 1 1 auto; min-height: 0; }
+.panel-body--flush { padding: 0; }
+.panel-foot {
+  padding: var(--s3) var(--s4);
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: var(--fs-sm); color: var(--text-2);
+  display: flex; align-items: flex-start; gap: var(--s3); flex-wrap: nowrap;
+}
+.panel-foot > span { min-width: 0; }
+.panel-foot > svg { margin-top: 2px; }
+
+/* === Stat tile ============================================================
+   The top row of a dashboard. A 2px cap carries the state colour, so posture
+   is legible from across a room before a single word is read.
+   ========================================================================= */
+
+.stat {
+  position: relative;
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r3);
+  box-shadow: var(--shadow-1);
+  min-width: 0;
+  overflow: hidden;
+}
+.stat::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: var(--line-strong);
+  transition: background var(--dur2) var(--ease);
+}
+.stat[data-tone="ok"]::before      { background: var(--jade); }
+.stat[data-tone="warn"]::before    { background: var(--amber); }
+.stat[data-tone="stop"]::before    { background: var(--crimson); }
+.stat[data-tone="accent"]::before  { background: var(--accent); }
+
+.stat-label { display: flex; align-items: center; gap: var(--s2); }
+.stat-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xl);
+  font-weight: 500;
+  letter-spacing: -.02em;
+  line-height: 1.05;
+  display: flex; align-items: baseline; gap: var(--s2);
+  min-width: 0;
+}
+.stat-unit { font-size: var(--fs-sm); color: var(--text-3); letter-spacing: 0; font-weight: 400; }
+.stat-sub { font-size: var(--fs-sm); color: var(--text-2); line-height: 1.4; }
+.stat-figure { margin-top: auto; padding-top: var(--s2); }
+
+/* === Badges =============================================================== */
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  padding: 2px var(--s2);
+  border-radius: var(--r1);
+  border: 1px solid transparent;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: none; }
+.badge--bare::before { display: none; }
+.badge[data-tone="ok"]      { color: var(--jade);    background: var(--jade-soft);    border-color: var(--jade-line); }
+.badge[data-tone="warn"]    { color: var(--amber);   background: var(--amber-soft);   border-color: var(--amber-line); }
+.badge[data-tone="stop"]    { color: var(--crimson); background: var(--crimson-soft); border-color: var(--crimson-line); }
+.badge[data-tone="accent"]  { color: var(--accent);  background: var(--accent-soft);  border-color: var(--accent-line); }
+.badge[data-tone="neutral"] { color: var(--text-3);  background: var(--neutral-soft); border-color: var(--neutral-line); }
+
+/* === Buttons ============================================================== */
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--s2);
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  letter-spacing: -.003em;
+  padding: 0 var(--s3);
+  height: 30px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r2);
+  background: var(--surface);
+  color: var(--text);
+  white-space: nowrap;
+  transition: background var(--dur1) var(--ease), border-color var(--dur1) var(--ease),
+              color var(--dur1) var(--ease), opacity var(--dur1) var(--ease),
+              transform var(--dur1) var(--ease);
+}
+.btn svg { width: 14px; height: 14px; }
+.btn:hover:not(:disabled) { background: var(--surface-3); border-color: var(--text-3); }
+.btn:active:not(:disabled) { transform: translateY(.5px); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+.btn--primary {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+}
+.btn--primary:hover:not(:disabled) { background: var(--accent-hi); border-color: var(--accent-hi); }
+
+.btn--ghost { border-color: transparent; background: transparent; color: var(--text-2); }
+.btn--ghost:hover:not(:disabled) { background: var(--surface-3); color: var(--text); border-color: transparent; }
+
+.btn--danger { color: var(--crimson); border-color: var(--crimson-line); background: var(--crimson-soft); }
+.btn--danger:hover:not(:disabled) { background: var(--crimson); border-color: var(--crimson); color: var(--text-inv); }
+
+.btn--sm { height: 24px; font-size: var(--fs-tiny); padding: 0 var(--s2); gap: 5px; }
+.btn--sm svg { width: 12px; height: 12px; }
+.btn--lg { height: 34px; padding: 0 var(--s4); font-size: var(--fs-base); }
+.btn--wide { width: 100%; }
+
+/* A disclosure button's chevron points at what it will do next. */
+.btn[aria-expanded] svg { transition: transform var(--dur2) var(--ease); }
+.btn[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+.btn[data-busy] { color: transparent; position: relative; pointer-events: none; }
+.btn[data-busy]::after {
+  content: ""; position: absolute; width: 13px; height: 13px;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  border-radius: 50%;
+  color: var(--text-2);
+  animation: spin .7s linear infinite;
+}
+.btn--primary[data-busy]::after { color: var(--on-accent); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Segmented control - for filters whose options are few and mutually
+   exclusive. A select for three options hides two of them for no reason. */
+.segmented {
+  display: inline-flex; padding: 2px; gap: 2px;
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+}
+.segmented button {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: .06em; text-transform: uppercase;
+  padding: 3px var(--s2);
+  border-radius: var(--r1);
+  color: var(--text-3);
+  transition: background var(--dur1) var(--ease), color var(--dur1) var(--ease);
+}
+.segmented button:hover { color: var(--text); }
+.segmented button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-1); }
+
+/* === Readout (key/value) ==================================================
+   A definition grid, not a table: these are attributes of one object. The
+   value column is monospace because half of them are hex.
+   ========================================================================= */
+
+.readout { display: grid; grid-template-columns: minmax(130px, .42fr) minmax(0, 1fr); }
+.readout > div { display: contents; }
+.readout dt, .readout dd {
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line-soft);
+  min-width: 0;
+}
+.readout > div:last-child dt, .readout > div:last-child dd { border-bottom: none; }
+.readout dt { font-size: var(--fs-sm); color: var(--text-2); padding-right: var(--s4); }
+.readout dd {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  display: flex; align-items: center; gap: var(--s2);
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.readout--tight dt, .readout--tight dd { padding: 5px 0; }
+
+/* A value that just changed. The flash is the only place in the system where
+   motion carries information rather than polish: a number moving under a
+   5-second poll is easy to miss entirely. */
+@keyframes flash {
+  from { background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
+  to   { background: transparent; box-shadow: 0 0 0 3px transparent; }
+}
+.flash { animation: flash 900ms var(--ease-out); border-radius: var(--r1); }
+@media (prefers-reduced-motion: reduce) { .flash { animation: none; } }
+
+/* === Copyable value =======================================================
+   A truncated key is unusable - it is exactly the thing an operator needs to
+   carry to another machine. Show a short form, keep the whole value one click
+   (and one selection) away.
+   ========================================================================= */
+
+.copyable { display: inline-flex; align-items: center; gap: var(--s2); min-width: 0; max-width: 100%; }
+.copyable-text { overflow-wrap: anywhere; }
+.copy-btn {
+  display: inline-grid; place-items: center;
+  width: 20px; height: 20px; flex: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r1);
+  color: var(--text-3);
+  transition: color var(--dur1) var(--ease), border-color var(--dur1) var(--ease),
+              background var(--dur1) var(--ease);
+}
+.copy-btn svg { width: 11px; height: 11px; }
+.copy-btn:hover { color: var(--text); border-color: var(--line-strong); background: var(--surface-3); }
+.copy-btn[data-copied] { color: var(--jade); border-color: var(--jade-line); background: var(--jade-soft); }
+
+/* === Callout ============================================================== */
+
+.callout {
+  display: flex; gap: var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-left-width: 2px;
+  border-radius: var(--r2);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text-2);
+}
+.callout strong { color: var(--text); font-weight: 600; }
+.callout svg { width: 15px; height: 15px; flex: none; margin-top: 1px; color: var(--text-3); }
+.callout[data-tone="ok"]     { border-left-color: var(--jade);    background: var(--jade-soft);    border-color: var(--jade-line); border-left-color: var(--jade); }
+.callout[data-tone="ok"] svg { color: var(--jade); }
+.callout[data-tone="warn"]   { border-left-color: var(--amber);   background: var(--amber-soft);   border-color: var(--amber-line); border-left-color: var(--amber); }
+.callout[data-tone="warn"] svg { color: var(--amber); }
+.callout[data-tone="stop"]   { border-left-color: var(--crimson); background: var(--crimson-soft); border-color: var(--crimson-line); border-left-color: var(--crimson); }
+.callout[data-tone="stop"] svg { color: var(--crimson); }
+.callout[data-tone="accent"] { border-left-color: var(--accent);  background: var(--accent-soft);  border-color: var(--accent-line); border-left-color: var(--accent); }
+.callout[data-tone="accent"] svg { color: var(--accent); }
+.callout:empty { display: none; }
+
+/* === Assurance ledger =====================================================
+   The centrepiece, and the reason this console exists. Each row is one claim
+   an operator might make to an auditor, with the verdict that claim currently
+   earns and the consequence spelled out in words. The product's own position
+   is that a single green light is a lie; four separate facts are not.
+   ========================================================================= */
+
+.ledger { display: flex; flex-direction: column; }
+.ledger-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: var(--s3);
+  align-items: start;
+  padding: var(--s4);
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  width: 100%;
+  transition: background var(--dur1) var(--ease);
+}
+.ledger-item:last-child { border-bottom: none; }
+button.ledger-item:hover { background: var(--surface-2); }
+button.ledger-item:hover .ledger-go { color: var(--accent); transform: translateX(2px); }
+
+.ledger-mark {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--neutral-line);
+  background: var(--neutral-soft);
+  color: var(--text-3);
+}
+.ledger-mark svg { width: 13px; height: 13px; }
+.ledger-item[data-tone="ok"]   .ledger-mark { color: var(--jade);    background: var(--jade-soft);    border-color: var(--jade-line); }
+.ledger-item[data-tone="warn"] .ledger-mark { color: var(--amber);   background: var(--amber-soft);   border-color: var(--amber-line); }
+.ledger-item[data-tone="stop"] .ledger-mark { color: var(--crimson); background: var(--crimson-soft); border-color: var(--crimson-line); }
+
+.ledger-claim { font-size: var(--fs-base); font-weight: 550; letter-spacing: -.008em; }
+.ledger-verdict { margin-top: 3px; font-size: var(--fs-sm); color: var(--text-2); line-height: 1.5; }
+.ledger-side { display: flex; align-items: center; gap: var(--s2); padding-top: 2px; }
+.ledger-go { color: var(--text-3); transition: color var(--dur1) var(--ease), transform var(--dur1) var(--ease); }
+.ledger-go svg { width: 14px; height: 14px; }
+
+/* === Tables ===============================================================
+   Hairlines, no zebra. Zebra striping solves a tracking problem that row
+   hover and tabular figures already solve, and it costs a second background
+   colour that then competes with state.
+   ========================================================================= */
+
+.table-wrap { width: 100%; overflow-x: auto; }
+table.data { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+table.data th {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  position: sticky; top: 0; z-index: var(--z-sticky);
+  white-space: nowrap;
+}
+table.data td {
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+  color: var(--text-2);
+}
+table.data tbody tr { transition: background var(--dur1) var(--ease); }
+table.data tbody tr:hover { background: var(--surface-2); }
+table.data tbody tr:last-child td { border-bottom: none; }
+table.data td.num, table.data td .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+table.data td.t-right, table.data th.t-right { text-align: right; }
+table.data .cell-strong { color: var(--text); font-weight: 500; }
+
+/* An expandable row: the full hash and signature are the point of an audit
+   log, and they do not fit on one line at any sane density. */
+tr.row-expand > td { padding: 0; }
+.row-detail {
+  padding: var(--s3) var(--s3) var(--s4) calc(var(--s3) + 30px);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-soft);
+}
+.disclose {
+  display: inline-grid; place-items: center;
+  width: 18px; height: 18px;
+  border-radius: var(--r1);
+  color: var(--text-3);
+  transition: color var(--dur1) var(--ease), transform var(--dur2) var(--ease),
+              background var(--dur1) var(--ease);
+}
+.disclose svg { width: 12px; height: 12px; }
+.disclose:hover { background: var(--surface-3); color: var(--text); }
+.disclose[aria-expanded="true"] { transform: rotate(90deg); color: var(--text); }
+
+/* === Code / raw payloads ================================================== */
+
+.code {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  padding: var(--s3);
+  overflow: auto;
+  max-height: 420px;
+  white-space: pre;
+  tab-size: 2;
+}
+.code--tall { max-height: 620px; }
+.code-head {
+  display: flex; align-items: center; gap: var(--s2);
+  padding-bottom: var(--s2);
+}
+code.inline {
+  font-family: var(--mono); font-size: .92em;
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r1);
+  padding: 1px 5px;
+  color: var(--text);
+}
+
+/* === Meter & sparkline ==================================================== */
+
+.meter { height: 4px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
+.meter-fill {
+  height: 100%; border-radius: var(--r-pill);
+  background: var(--accent);
+  transition: width var(--dur3) var(--ease), background var(--dur2) var(--ease);
+}
+.meter-fill[data-tone="warn"] { background: var(--amber); }
+.meter-fill[data-tone="stop"] { background: var(--crimson); }
+
+.spark { width: 100%; height: 34px; display: block; overflow: visible; }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 1.25; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.spark-line--muted { stroke: var(--text-3); stroke-dasharray: 2 2; }
+.spark-area { fill: var(--accent); opacity: .08; }
+.spark-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+
+/* === Forms ================================================================ */
+
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field-row { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+
+.input, select.input, textarea.input {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r2);
+  padding: 0 var(--s2);
+  height: 30px;
+  width: 100%;
+  min-width: 0;
+  transition: border-color var(--dur1) var(--ease), box-shadow var(--dur1) var(--ease);
+}
+textarea.input { height: auto; padding: var(--s2); line-height: 1.55; resize: none; }
+.input:hover:not(:focus) { border-color: var(--text-3); }
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); outline: none; }
+.input::placeholder { color: var(--text-3); }
+select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
+
+.input-icon { position: relative; display: flex; align-items: center; min-width: 0; flex: none; }
+.input-icon svg { position: absolute; left: var(--s2); width: 14px; height: 14px; color: var(--text-3); pointer-events: none; }
+.input-icon .input { padding-left: calc(var(--s5) + 6px); }
+
+.w-xs { width: 72px; } .w-sm { width: 116px; } .w-md { width: 180px; } .w-lg { width: 260px; }
+
+/* The inference toolbar carries six controls in a column that also hosts the
+   inspector. These are sized so it stays on one row at a laptop width and
+   wraps cleanly rather than scrolling when it cannot. */
+#c-model  { width: 150px; }
+#c-client { width: 104px; }
+
+/* A switch, because a checkbox at this density is a 13px target with no
+   label affordance. */
+.switch { display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer; user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track {
+  width: 30px; height: 17px; flex: none;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  position: relative;
+  transition: background var(--dur2) var(--ease), border-color var(--dur2) var(--ease);
+}
+.switch-track::after {
+  content: ""; position: absolute; top: 1px; left: 1px;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--text-3);
+  transition: transform var(--dur2) var(--ease), background var(--dur2) var(--ease);
+}
+.switch input:checked + .switch-track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .switch-track::after { transform: translateX(13px); background: var(--on-accent); }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch-label { font-family: var(--mono); font-size: var(--fs-micro); letter-spacing: var(--track-label); text-transform: uppercase; color: var(--text-3); }
+
+/* === States: empty, loading, error ======================================== */
+
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: var(--s3);
+  padding: var(--s10) var(--s4);
+  text-align: center;
+}
+.empty-mark {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border: 1px dashed var(--line-strong); border-radius: var(--r2);
+  color: var(--text-3);
+}
+.empty-mark svg { width: 16px; height: 16px; }
+.empty-title { font-size: var(--fs-base); font-weight: 550; color: var(--text); }
+.empty-text { font-size: var(--fs-sm); color: var(--text-2); max-width: 46ch; line-height: 1.55; }
+
+.skeleton {
+  border-radius: var(--r1);
+  background: linear-gradient(90deg, var(--surface-3) 25%, var(--surface-2) 37%, var(--surface-3) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+  color: transparent;
+}
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
+/* === Toasts =============================================================== */
+
+.toasts {
+  position: fixed; bottom: calc(var(--statusbar-h) + var(--s3)); right: var(--s4);
+  z-index: var(--z-toast);
+  display: flex; flex-direction: column; gap: var(--s2);
+  pointer-events: none;
+  max-width: min(380px, calc(100vw - var(--s8)));
+}
+.toast {
+  display: flex; align-items: flex-start; gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r2);
+  box-shadow: var(--shadow-3);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  pointer-events: auto;
+  animation: toast-in var(--dur3) var(--ease-out) both;
+}
+.toast[data-tone="ok"]   { border-left-color: var(--jade); }
+.toast[data-tone="stop"] { border-left-color: var(--crimson); }
+.toast svg { width: 14px; height: 14px; margin-top: 2px; flex: none; color: var(--text-3); }
+.toast[data-tone="ok"] svg   { color: var(--jade); }
+.toast[data-tone="stop"] svg { color: var(--crimson); }
+.toast[data-leaving] { animation: toast-out var(--dur2) var(--ease) both; }
+@keyframes toast-in  { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(4px); } }
+
+/* === Command palette ======================================================
+   A console with no password has the keyboard as its only fast path. Ctrl-K
+   reaches every view and every privileged action without a mouse.
+   ========================================================================= */
+
+.scrim {
+  position: fixed; inset: 0; z-index: var(--z-scrim);
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur2) var(--ease);
+}
+.scrim[data-open] { opacity: 1; pointer-events: auto; }
+
+.palette {
+  position: fixed; z-index: var(--z-palette);
+  top: 12vh; left: 50%; transform: translateX(-50%) scale(.97);
+  width: min(560px, calc(100vw - var(--s8)));
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r4);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur2) var(--ease), transform var(--dur2) var(--ease-out);
+}
+.palette[data-open] { opacity: 1; pointer-events: auto; transform: translateX(-50%) scale(1); }
+
+.palette-input-wrap {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+}
+.palette-input-wrap svg { width: 16px; height: 16px; color: var(--text-3); }
+#pal-input {
+  flex: 1; border: none; background: none; outline: none;
+  font-family: var(--sans); font-size: var(--fs-md); color: var(--text);
+  height: 24px;
+}
+#pal-input::placeholder { color: var(--text-3); }
+
+.palette-list { max-height: min(48vh, 400px); overflow-y: auto; padding: var(--s2); }
+.palette-group + .palette-group { margin-top: var(--s2); }
+.palette-group > .label { padding: var(--s2) var(--s3) var(--s1); display: block; }
+.palette-item {
+  display: flex; align-items: center; gap: var(--s3);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r2);
+  font-size: var(--fs-base);
+  color: var(--text-2);
+  text-align: left;
+}
+.palette-item svg { width: 15px; height: 15px; color: var(--text-3); }
+.palette-item[data-sel] { background: var(--accent-soft); color: var(--text); }
+.palette-item[data-sel] svg { color: var(--accent); }
+.palette-item .palette-hint { margin-left: auto; font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+.palette-foot {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: var(--fs-micro); color: var(--text-3);
+  font-family: var(--mono); letter-spacing: .04em;
+}
+
+/* === Inference console ====================================================
+   A chat surface, but an instrumented one: the point is not the text, it is
+   what the pipeline did to produce it. The inspector on the right is the
+   receipt - tokens, finish reason, policy outcome, signature.
+   ========================================================================= */
+
+.console-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 286px;
+  min-height: 0; flex: 1 1 auto;
+}
+.console-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+.console-bar {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--pad);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+  flex-wrap: wrap;
+  row-gap: var(--s2);
+}
+.console-bar .field-row { flex: none; }
+
+.transcript {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: var(--s6) var(--pad) var(--s4);
+  background: var(--bg);
+}
+.thread { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--s6); }
+/* An empty transcript is the first thing an operator sees here, so it sits
+   where the eye lands rather than pinned under the toolbar. */
+.transcript .empty { padding-top: 11vh; }
+
+.turn { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: var(--s3); }
+.turn-gutter { display: flex; flex-direction: column; align-items: flex-end; gap: var(--s1); padding-top: 1px; }
+.turn-role {
+  font-family: var(--mono); font-size: var(--fs-micro);
+  letter-spacing: var(--track-label); text-transform: uppercase;
+  color: var(--text-3);
+}
+.turn--user .turn-role { color: var(--accent); }
+.turn--error .turn-role { color: var(--crimson); }
+.turn-seq { font-family: var(--mono); font-size: 9.5px; color: var(--text-3); opacity: .7; }
+
+.turn-body {
+  font-size: var(--fs-base);
+  line-height: 1.68;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  padding-left: var(--s4);
+  border-left: 1px solid var(--line);
+}
+.turn--user .turn-body { border-left-color: var(--accent); color: var(--text); }
+.turn--error .turn-body {
+  border-left-color: var(--crimson);
+  color: var(--crimson);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+
+/* The receipt belongs under the text, not under the role label: it is a third
+   item in the turn's grid and has to be told to sit in the body column. */
+.turn-meta {
+  grid-column: 2 / -1;
+  display: flex; gap: var(--s2); flex-wrap: wrap;
+  margin-top: var(--s3); padding-left: var(--s4);
+}
+
+.caret::after {
+  content: "";
+  display: inline-block; vertical-align: -1px;
+  width: 7px; height: 14px; margin-left: 2px;
+  background: var(--accent);
+  animation: blink 1.05s steps(2, start) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .caret::after { animation: none; opacity: .5; } }
+
+.composer { flex: none; border-top: 1px solid var(--line); background: var(--surface); padding: var(--s3) var(--pad) var(--s4); }
+.composer-inner { max-width: 780px; margin: 0 auto; }
+.composer-box {
+  display: flex; align-items: flex-end; gap: var(--s2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r3);
+  background: var(--surface);
+  padding: var(--s2);
+  transition: border-color var(--dur1) var(--ease), box-shadow var(--dur1) var(--ease);
+}
+.composer-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#prompt {
+  flex: 1; border: none; background: none; outline: none; box-shadow: none;
+  font-family: var(--sans); font-size: var(--fs-base); line-height: 1.55;
+  min-height: 26px; max-height: 200px; padding: 2px var(--s1); resize: none;
+}
+#prompt:focus { border: none; box-shadow: none; }
+.composer-foot {
+  display: flex; align-items: center; gap: var(--s3);
+  margin-top: var(--s2);
+  font-family: var(--mono); font-size: var(--fs-micro);
+  letter-spacing: .04em; color: var(--text-3);
+  flex-wrap: wrap;
+}
+
+/* The inspector. Same values the API returned, held still so they can be
+   read - a receipt that does not scroll away with the transcript. */
+.inspector {
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  overflow-y: auto;
+  min-height: 0;
+  display: flex; flex-direction: column;
+}
+.inspector-head {
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: var(--s2);
+  flex: none;
+}
+.inspector-body { padding: var(--s4); display: flex; flex-direction: column; gap: var(--s5); }
+.inspector-section { display: flex; flex-direction: column; gap: var(--s2); }
+
+/* === Responsive ===========================================================
+   Three frames, not a continuum:
+     >= 1180  rail + inspector, 12-col dashboards
+     760-1180 icon rail, inspector folds into the transcript, halved spans
+     <  760   off-canvas rail, one column, tables become record cards
+   ========================================================================= */
+
+@media (max-width: 1180px) {
+  /* Below this width the rail is folded by the window rather than by the
+     operator, so offering them a fold button would be offering a control
+     that cannot hold its setting. */
+  .rail-collapse { display: none; }
+
+  .col-3, .col-4 { grid-column: span 6; }
+  .col-5, .col-6, .col-7, .col-8 { grid-column: span 12; }
+
+  .console-shell { grid-template-columns: minmax(0, 1fr); }
+  .inspector { display: none; }
+  .inspector[data-mobile-open] {
+    display: flex; position: absolute; inset: auto 0 0 0; max-height: 60%;
+    border-top: 1px solid var(--line); box-shadow: var(--shadow-3); z-index: var(--z-inspector);
+  }
+}
+
+@media (max-width: 760px) {
+  :root { --topbar-h: 50px; }
+
+  .app { grid-template-columns: minmax(0, 1fr); }
+  /* Off canvas the rail is no longer part of the frame, it is a thing laid
+     over the page. It has to clear the scrim it raises, or every tap on a
+     nav item lands on the backdrop and closes the drawer instead. */
+  .rail {
+    position: fixed; inset: 0 auto 0 0; width: min(280px, 84vw);
+    z-index: var(--z-drawer);
+    transform: translateX(-102%);
+    transition: transform var(--dur3) var(--ease-out);
+    box-shadow: var(--shadow-3);
+  }
+  .rail[data-open] { transform: none; }
+  .rail-toggle { display: grid; }
+
+  .col-3, .col-4, .col-5, .col-6, .col-7, .col-8 { grid-column: span 12; }
+  .page { padding: var(--s5) var(--pad) var(--s10); }
+  /* In a column flex container a `flex-basis` of 420px is a height, not a
+     width, and it would open a 420px hole between the description and the
+     actions. The text block sizes to its content here. */
+  .page-head { flex-direction: column; gap: var(--s4); align-items: stretch; }
+  .page-head-text { flex: 0 0 auto; min-width: 0; }
+  .page-actions { width: 100%; }
+
+  /* The top bar keeps one title and the state. The section name is already
+     the highlighted group in the drawer, and "live" is already a pulsing dot. */
+  .crumbs .label, .crumb-sep { display: none; }
+  .crumb-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pip { padding: var(--s1); }
+  #conn-text { display: none; }
+
+  .readout { grid-template-columns: minmax(0, 1fr); }
+  .readout dt { padding-bottom: 0; border-bottom: none; }
+  .readout dd { padding-top: 2px; }
+  .readout > div:last-child dt { border-bottom: none; }
+
+  /* Tables become record cards. A horizontal scrollbar on a phone hides
+     columns that are the entire reason the row exists. */
+  table.data.responsive thead { display: none; }
+  table.data.responsive, table.data.responsive tbody, table.data.responsive tr, table.data.responsive td { display: block; width: 100%; }
+  table.data.responsive tr {
+    border: 1px solid var(--line); border-radius: var(--r2);
+    padding: var(--s2); margin-bottom: var(--s2); background: var(--surface);
+  }
+  table.data.responsive td { border: none; padding: var(--s1) var(--s2); display: flex; gap: var(--s3); align-items: baseline; }
+  table.data.responsive td::before {
+    content: attr(data-label);
+    font-family: var(--mono); font-size: var(--fs-micro);
+    letter-spacing: var(--track-label); text-transform: uppercase;
+    color: var(--text-3); flex: none; width: 88px;
+  }
+  table.data.responsive td.t-right { text-align: left; }
+  /* The row toggle is a control, not a field: it sits on the card's corner
+     rather than taking a labelled line of its own. */
+  table.data.responsive tr { position: relative; }
+  table.data.responsive td:first-child:empty { display: none; }
+  table.data.responsive td:first-child:has(.disclose) {
+    position: absolute; top: var(--s2); right: var(--s2);
+    width: auto; padding: 0;
+  }
+  table.data.responsive td:first-child:has(.disclose)::before { display: none; }
+  table.data.responsive tr.row-expand { padding: 0; border: none; margin: 0; }
+  .row-detail { padding: var(--s3); }
+
+  /* A verdict badge competing with the claim for a 375px row leaves neither
+     legible. The verdict drops below the sentence it qualifies. */
+  .ledger-item { grid-template-columns: 26px minmax(0, 1fr); }
+  .ledger-side { grid-column: 2; margin-top: var(--s2); padding-top: 0; }
+
+  .turn { grid-template-columns: minmax(0, 1fr); gap: var(--s2); }
+  .turn-gutter { flex-direction: row; align-items: baseline; gap: var(--s2); }
+  .turn-body { padding-left: var(--s3); }
+  .turn-meta { grid-column: 1 / -1; padding-left: var(--s3); }
+
+  /* A panel's toolbar cannot share a 375px line with the panel's own name,
+     and the fixed control widths that keep it on one row at a laptop size
+     are what push it off the screen here. The tools take their own row and
+     the filter takes the width of it. */
+  .panel-head { flex-wrap: wrap; row-gap: var(--s2); }
+  .panel-tools { margin-left: 0; width: 100%; flex-wrap: wrap; }
+  .panel-tools > .input-icon { flex: 1 1 100%; }
+  .panel-tools > .input-icon .input { width: 100%; }
+  .panel-tools > .input { flex: 1 1 auto; width: auto; min-width: 0; }
+
+  .toasts { right: var(--s3); left: var(--s3); bottom: calc(var(--statusbar-h) + var(--s2)); max-width: none; }
+  .palette { top: var(--s4); }
+  .statusbar { gap: var(--s3); }
+}
+
+@media (max-width: 420px) {
+  .console-bar { gap: var(--s2); }
+  .stat-value { font-size: 22px; }
+}
+
+/* Coarse pointers get real targets even at desktop widths. */
+@media (pointer: coarse) {
+  .btn { height: 34px; }
+  .btn--sm { height: 28px; }
+  .icon-btn { width: 34px; height: 34px; }
+  .copy-btn { width: 26px; height: 26px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* A console is evidence. Printing one should produce a legible record. */
+@media print {
+  body { height: auto; overflow: visible; background: #FFFFFF; }
+  .rail, .topbar, .statusbar, .toasts, .palette, .scrim, .composer, .console-bar { display: none !important; }
+  .app { display: block; }
+  .main { display: block; }
+  .viewport { overflow: visible; }
+  .panel { break-inside: avoid; box-shadow: none; }
+}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#content">Skip to content</a>
+
+<div class="app">
+
+  <!-- ══ Identity rail ═══════════════════════════════════════════════════ -->
+  <aside class="rail" id="rail">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <!-- Cordon, drawn. One unbroken line comes in through the single
+             break in the perimeter, turns once, and closes around the thing
+             being protected. There is no second way in, and the way in is
+             the part the operator is being asked to trust. -->
+        <svg viewBox="0 0 32 32" fill="none">
+          <path d="M4 22V4H28V28H11V11H21V21"
+                stroke="currentColor" stroke-width="2.4"
+                stroke-linecap="square" stroke-linejoin="miter"></path>
+          <rect class="brand-core" x="13.9" y="13.9" width="4.2" height="4.2"></rect>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <span class="brand-name">Cordon</span>
+        <span class="brand-sub">Operator Console</span>
+      </span>
+    </div>
+
+    <div class="rail-scroll">
+      <nav class="nav-group" aria-labelledby="nav-g1">
+        <span class="label" id="nav-g1">Posture</span>
+        <button class="nav-item" data-view="overview" aria-current="page">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <rect x="2" y="2" width="5" height="5" rx="1"></rect>
+            <rect x="9" y="2" width="5" height="5" rx="1"></rect>
+            <rect x="2" y="9" width="5" height="5" rx="1"></rect>
+            <rect x="9" y="9" width="5" height="5" rx="1"></rect>
+          </svg>
+          <span class="nav-label">Node posture</span>
+        </button>
+      </nav>
+
+      <nav class="nav-group" aria-labelledby="nav-g2">
+        <span class="label" id="nav-g2">Assurance</span>
+        <button class="nav-item" data-view="attestation">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 1.8 13 4v4.2c0 2.8-2.1 4.7-5 5.9-2.9-1.2-5-3.1-5-5.9V4Z"></path>
+            <path d="m5.9 8 1.5 1.5L10.3 6.6"></path>
+          </svg>
+          <span class="nav-label">Attestation</span>
+          <span class="nav-tag" id="nav-att-tag" hidden>!</span>
+        </button>
+        <button class="nav-item" data-view="audit">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <path d="M6.4 4.6h5.1M6.4 8h5.1M6.4 11.4h5.1"></path>
+            <circle cx="3.4" cy="4.6" r="1.1"></circle>
+            <circle cx="3.4" cy="8" r="1.1"></circle>
+            <circle cx="3.4" cy="11.4" r="1.1"></circle>
+          </svg>
+          <span class="nav-label">Audit chain</span>
+          <span class="nav-tag" id="nav-audit-tag">0</span>
+        </button>
+      </nav>
+
+      <nav class="nav-group" aria-labelledby="nav-g3">
+        <span class="label" id="nav-g3">Operations</span>
+        <button class="nav-item" data-view="console">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2.5 3.5h11v7.2h-6L4.4 13V10.7H2.5Z"></path>
+            <path d="M5.6 7h4.8" stroke-width="1.2"></path>
+          </svg>
+          <span class="nav-label">Inference</span>
+        </button>
+        <button class="nav-item" data-view="models">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
+            <path d="M8 1.9 14 5v6l-6 3.1L2 11V5Z"></path>
+            <path d="M2 5l6 3.1L14 5M8 8.1v6"></path>
+          </svg>
+          <span class="nav-label">Model store</span>
+          <span class="nav-tag" id="nav-models-tag">0</span>
+        </button>
+      </nav>
+
+      <nav class="nav-group" aria-labelledby="nav-g4">
+        <span class="label" id="nav-g4">Reference</span>
+        <button class="nav-item" data-view="api">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m5.6 10.8-2.9-2.9 2.9-2.9M10.4 5l2.9 2.9-2.9 2.9"></path>
+          </svg>
+          <span class="nav-label">API surface</span>
+        </button>
+      </nav>
+    </div>
+
+    <div class="rail-foot">
+      <button class="cmd-hint" id="open-palette" title="Command palette">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+          <circle cx="7.2" cy="7.2" r="4.2"></circle><path d="m10.4 10.4 2.6 2.6"></path>
+        </svg>
+        <span class="spacer" style="text-align:left">Commands</span>
+        <kbd>Ctrl K</kbd>
+      </button>
+      <button class="rail-collapse" id="rail-collapse" aria-expanded="true"
+              aria-controls="rail" aria-label="Collapse the sidebar"
+              title="Collapse the sidebar">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.2" y="3" width="11.6" height="10"></rect>
+          <path d="M6.6 3v10"></path>
+          <path d="m11.4 6.6-1.4 1.4 1.4 1.4"></path>
+        </svg>
+        <span class="spacer" style="text-align:left">Collapse</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ══ Main column ═════════════════════════════════════════════════════ -->
+  <div class="main">
+
+    <header class="topbar">
+      <button class="icon-btn rail-toggle" id="rail-toggle" aria-label="Open navigation" aria-expanded="false">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"></path>
+        </svg>
+      </button>
+
+      <div class="crumbs">
+        <span class="label" id="crumb-section">Posture</span>
+        <span class="crumb-sep" aria-hidden="true">/</span>
+        <h1 class="crumb-current" id="crumb-title">Node posture</h1>
+      </div>
+
+      <span class="spacer"></span>
+
+      <div class="topbar-tools">
+        <span class="pip" id="conn-pip" data-state="idle" title="Status poll">
+          <span class="pip-dot"></span><span id="conn-text">connecting</span>
+        </span>
+        <span class="badge" data-tone="neutral" id="top-state">unknown</span>
+        <button class="icon-btn" id="theme-btn" aria-label="Switch colour scheme" title="Switch colour scheme">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <circle cx="8" cy="8" r="3.1"></circle>
+            <path d="M8 1.4v1.6M8 13v1.6M14.6 8H13M3 8H1.4M12.66 3.34l-1.13 1.13M4.47 11.53l-1.13 1.13M12.66 12.66l-1.13-1.13M4.47 4.47 3.34 3.34"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="viewport" id="content" tabindex="-1">
+
+      <!-- ══ Posture ══════════════════════════════════════════════════════ -->
+      <section class="view" data-view="overview" data-active aria-label="Node posture">
+        <div class="page">
+
+          <div class="page-head">
+            <div class="page-head-text">
+              <span class="eyebrow">Posture</span>
+              <h2 class="page-title">Node posture</h2>
+              <p class="page-desc">Everything this node will tell you about itself, and, separately, how much
+                of it a third party could check. The two are not the same, and this page keeps them apart.</p>
+            </div>
+            <div class="page-actions">
+              <button class="btn" id="o-refresh">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"></path><path d="M13.7 2.4v3.2h-3.2"></path>
+                </svg>Refresh
+              </button>
+              <button class="btn btn--primary" data-goto="audit">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2.6 8.3 6 11.7l7.4-7.4"></path>
+                </svg>Verify the chain
+              </button>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="stat col-3" id="s-state" data-tone="neutral">
+              <span class="stat-label label">Node state</span>
+              <span class="stat-value" id="s-state-v">·</span>
+              <span class="stat-sub" id="s-state-sub">Awaiting first poll</span>
+            </div>
+
+            <div class="stat col-3" id="s-assurance" data-tone="neutral">
+              <span class="stat-label label">Assurance</span>
+              <span class="stat-value" id="s-assurance-v">·<span class="stat-unit">/ 4</span></span>
+              <span class="stat-sub" id="s-assurance-sub">Claims a third party could check</span>
+            </div>
+
+            <div class="stat col-3" id="s-load" data-tone="neutral">
+              <span class="stat-label label">In flight</span>
+              <span class="stat-value" id="s-load-v">·</span>
+              <span class="stat-sub" id="s-load-sub">of capacity</span>
+              <div class="stat-figure"><div class="meter"><div class="meter-fill" id="s-load-meter" style="width:0%"></div></div></div>
+            </div>
+
+            <div class="stat col-3" id="s-audit" data-tone="neutral">
+              <span class="stat-label label">Audit entries</span>
+              <span class="stat-value" id="s-audit-v">·</span>
+              <span class="stat-sub"><span class="badge" data-tone="neutral" id="s-audit-chain">not yet checked</span></span>
+            </div>
+          </div>
+
+          <div class="grid">
+            <!-- The assurance ledger: the console's central argument. -->
+            <div class="panel col-7">
+              <div class="panel-head">
+                <span class="eyebrow">Assurance ledger</span>
+                <div class="panel-tools">
+                  <span class="label" id="ledger-summary">·</span>
+                </div>
+              </div>
+              <div class="ledger" id="ledger">
+                <div class="ledger-item"><div class="ledger-mark skeleton"></div>
+                  <div><div class="ledger-claim skeleton" style="width:42%">&nbsp;</div>
+                  <div class="ledger-verdict skeleton" style="width:80%;margin-top:6px">&nbsp;</div></div><div></div></div>
+              </div>
+              <div class="panel-foot">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px;color:var(--text-3)">
+                  <circle cx="8" cy="8" r="6"></circle><path d="M8 7.4v3.4M8 5.3v.1" stroke-linecap="round"></path>
+                </svg>
+                <span>A single indicator cannot express four independent facts. Each claim is verdicted on its own,
+                  and a claim nobody could check reads as unverified rather than as passing.</span>
+              </div>
+            </div>
+
+            <!-- Runtime -->
+            <div class="panel col-5">
+              <div class="panel-head">
+                <span class="eyebrow">Model runtime</span>
+                <div class="panel-tools">
+                  <span class="badge" data-tone="neutral" id="o-runtime-badge">·</span>
+                </div>
+              </div>
+              <div class="panel-body stack">
+                <dl class="readout readout--tight">
+                  <div><dt>Backend</dt><dd id="o-backend">·</dd></div>
+                  <div><dt>Model loaded</dt><dd id="o-model">·</dd></div>
+                  <div><dt>Sessions</dt><dd id="o-sessions">·</dd></div>
+                  <div><dt>Latency p50 / p99</dt><dd id="o-latency">·</dd></div>
+                </dl>
+
+                <div>
+                  <div class="row" style="justify-content:space-between;margin-bottom:var(--s2)">
+                    <span class="label">Latency, last 60 polls</span>
+                    <span class="label mono" id="o-spark-max">·</span>
+                  </div>
+                  <svg class="spark" id="o-spark" viewBox="0 0 240 34" preserveAspectRatio="none" role="img" aria-label="Recent latency">
+                    <path class="spark-area" id="o-spark-area" d=""></path>
+                    <path class="spark-line spark-line--muted" id="o-spark-p99" d=""></path>
+                    <path class="spark-line" id="o-spark-p50" d=""></path>
+                  </svg>
+                  <div class="row" style="justify-content:space-between;margin-top:var(--s1)">
+                    <span class="label" style="text-transform:none;letter-spacing:.02em">p50 solid · p99 dashed</span>
+                  </div>
+                </div>
+
+                <p class="callout" id="o-runtime-note" data-tone="neutral"></p>
+
+                <div class="row">
+                  <button class="btn btn--sm" id="o-logs-toggle" aria-expanded="false" aria-controls="o-logs">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m4.6 6.2 3.4 3.4 3.4-3.4"></path>
+                    </svg>Runtime output
+                  </button>
+                </div>
+                <pre class="code" id="o-logs" hidden>·</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="panel col-6">
+              <div class="panel-head">
+                <span class="eyebrow">Model store</span>
+                <div class="panel-tools">
+                  <button class="btn btn--sm btn--ghost" data-goto="models">Open
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m6.4 3.8 4.2 4.2-4.2 4.2"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="panel-body panel-body--flush" id="o-bundles"></div>
+            </div>
+
+            <div class="panel col-6">
+              <div class="panel-head">
+                <span class="eyebrow">Recent audit activity</span>
+                <div class="panel-tools">
+                  <button class="btn btn--sm btn--ghost" data-goto="audit">Open
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m6.4 3.8 4.2 4.2-4.2 4.2"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="panel-body panel-body--flush" id="o-activity">
+                <div class="empty">
+                  <span class="empty-mark">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+                      <path d="M6.4 4.6h5.1M6.4 8h5.1M6.4 11.4h5.1"></path>
+                      <circle cx="3.4" cy="4.6" r="1.1"></circle><circle cx="3.4" cy="8" r="1.1"></circle><circle cx="3.4" cy="11.4" r="1.1"></circle>
+                    </svg>
+                  </span>
+                  <span class="empty-title">The log is not open</span>
+                  <span class="empty-text">Reading the audit log is itself an audited act, so the console does not
+                    poll it in the background. Open it deliberately.</span>
+                  <button class="btn btn--sm" data-goto="audit">Read the log</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ══ Attestation ══════════════════════════════════════════════════ -->
+      <section class="view" data-view="attestation" aria-label="Attestation">
+        <div class="page">
+
+          <div class="page-head">
+            <div class="page-head-text">
+              <span class="eyebrow">Assurance</span>
+              <h2 class="page-title">Challenge this node</h2>
+              <p class="page-desc">A report is evidence only if it commits to a value <strong>you</strong> chose.
+                This issues a fresh 128-bit nonce, asks for a report bound to it, and reports what that report does
+                and does not establish as four separate facts. It is the same request a client would make.</p>
+            </div>
+            <div class="page-actions">
+              <span class="label mono" id="a-nonce">no challenge issued</span>
+              <button class="btn btn--primary" id="a-fetch">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M8 1.8 13 4v4.2c0 2.8-2.1 4.7-5 5.9-2.9-1.2-5-3.1-5-5.9V4Z"></path><path d="m5.9 8 1.5 1.5 2.9-2.9"></path>
+                </svg>Request a report
+              </button>
+            </div>
+          </div>
+
+          <div class="stack">
+            <p class="callout" id="a-verdict" data-tone="neutral">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                <circle cx="8" cy="8" r="6"></circle><path d="M8 7.4v3.4M8 5.3v.1" stroke-linecap="round"></path>
+              </svg>
+              <span>No report has been requested in this session. Nothing below is asserted yet.</span>
+            </p>
+
+            <div class="grid">
+              <div class="panel col-7">
+                <div class="panel-head"><span class="eyebrow">What this report establishes</span></div>
+                <div class="ledger" id="a-facts">
+                  <div class="ledger-item" data-tone="neutral">
+                    <span class="ledger-mark"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 4.6v4.2M8 11v.1"></path></svg></span>
+                    <div><div class="ledger-claim">Measurement source</div>
+                      <div class="ledger-verdict">Whether the measurements come from hardware or from this node's own configuration.</div></div>
+                    <div class="ledger-side"><span class="badge" data-tone="neutral">pending</span></div>
+                  </div>
+                  <div class="ledger-item" data-tone="neutral">
+                    <span class="ledger-mark"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 4.6v4.2M8 11v.1"></path></svg></span>
+                    <div><div class="ledger-claim">Platform quote</div>
+                      <div class="ledger-verdict">Whether a platform signed for these measurements, or the node is vouching for itself.</div></div>
+                    <div class="ledger-side"><span class="badge" data-tone="neutral">pending</span></div>
+                  </div>
+                  <div class="ledger-item" data-tone="neutral">
+                    <span class="ledger-mark"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 4.6v4.2M8 11v.1"></path></svg></span>
+                    <div><div class="ledger-claim">Binds the signing key</div>
+                      <div class="ledger-verdict">Whether the report ties the attested environment to the key that signs inference responses.</div></div>
+                    <div class="ledger-side"><span class="badge" data-tone="neutral">pending</span></div>
+                  </div>
+                  <div class="ledger-item" data-tone="neutral">
+                    <span class="ledger-mark"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 4.6v4.2M8 11v.1"></path></svg></span>
+                    <div><div class="ledger-claim">Measurements pinned</div>
+                      <div class="ledger-verdict">Whether the operator has committed expected values for a report to be checked against.</div></div>
+                    <div class="ledger-side"><span class="badge" data-tone="neutral">pending</span></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel col-5">
+                <div class="panel-head"><span class="eyebrow">Values</span></div>
+                <div class="panel-body">
+                  <dl class="readout">
+                    <div><dt>Measurement</dt><dd id="a-mrenclave">·</dd></div>
+                    <div><dt>Signing key</dt><dd id="a-key">·</dd></div>
+                    <div><dt>Nonce</dt><dd id="a-nonce-2">·</dd></div>
+                  </dl>
+                </div>
+                <div class="panel-foot">These are the values to carry off the node. A truncated key is not a key, so
+                  copy takes the whole thing.</div>
+              </div>
+            </div>
+
+            <div class="grid">
+              <div class="panel col-6">
+                <div class="panel-head">
+                  <span class="eyebrow">Pin these measurements</span>
+                  <div class="panel-tools">
+                    <button class="btn btn--sm" id="a-copy-pin" disabled>
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5.4" y="5.4" width="8.2" height="8.2" rx="1.4"></rect><path d="M10.6 5.4V3.8a1.4 1.4 0 0 0-1.4-1.4H3.8a1.4 1.4 0 0 0-1.4 1.4v5.4a1.4 1.4 0 0 0 1.4 1.4h1.6"></path></svg>
+                      Copy config block
+                    </button>
+                  </div>
+                </div>
+                <div class="panel-body stack">
+                  <p class="prose">Verification compares a report against values the operator pinned. A node with
+                    nothing pinned cannot be verified against anything, and says so rather than verifying trivially.
+                    Review these, then commit them to <code class="inline">cordon.toml</code>.</p>
+                  <pre class="code" id="a-pin">Request a report to see the block.</pre>
+                </div>
+              </div>
+
+              <div class="panel col-6">
+                <div class="panel-head">
+                  <span class="eyebrow">The report, verbatim</span>
+                  <div class="panel-tools">
+                    <button class="btn btn--sm btn--ghost" id="a-copy-raw" disabled>Copy JSON</button>
+                  </div>
+                </div>
+                <div class="panel-body">
+                  <pre class="code" id="a-raw">·</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ══ Audit ════════════════════════════════════════════════════════ -->
+      <section class="view" data-view="audit" aria-label="Audit chain">
+        <div class="page">
+
+          <div class="page-head">
+            <div class="page-head-text">
+              <span class="eyebrow">Assurance</span>
+              <h2 class="page-title">Audit chain</h2>
+              <p class="page-desc">A hash-chained, signed, append-only log. It records hashes, token counts and
+                policy outcomes, never prompts or completions. Reading it is itself recorded, so this view will
+                show its own access.</p>
+            </div>
+            <div class="page-actions">
+              <button class="btn" id="d-refresh">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"></path><path d="M13.7 2.4v3.2h-3.2"></path>
+                </svg>Refresh
+              </button>
+              <button class="btn" id="d-anchor">Take an anchor</button>
+              <button class="btn btn--primary" id="d-verify">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2.6 8.3 6 11.7l7.4-7.4"></path>
+                </svg>Verify the whole chain
+              </button>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="stat col-4" data-tone="neutral">
+              <span class="stat-label label">Entries</span>
+              <span class="stat-value" id="d-entries">·</span>
+              <span class="stat-sub">Sequence numbers are contiguous or the chain is broken.</span>
+            </div>
+            <div class="stat col-4" id="d-verdict-tile" data-tone="neutral">
+              <span class="stat-label label">Chain state</span>
+              <span class="stat-value" style="font-size:var(--fs-md);padding-top:var(--s1)">
+                <span class="badge" data-tone="neutral" id="d-verdict">not yet checked</span>
+              </span>
+              <span class="stat-sub" id="d-verdict-sub">Verification recomputes every hash and checks every signature.</span>
+            </div>
+            <div class="stat col-4" data-tone="neutral">
+              <span class="stat-label label">Chain head</span>
+              <span class="stat-value" style="font-size:var(--fs-sm);line-height:1.5;padding-top:var(--s1)" id="d-head">·</span>
+              <span class="stat-sub">Record this with a third party to make an earlier rewrite detectable.</span>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="panel col-12">
+              <div class="panel-head">
+                <span class="eyebrow">Entries</span>
+                <div class="panel-tools">
+                  <div class="input-icon">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="7.2" cy="7.2" r="4.2"></circle><path d="m10.4 10.4 2.6 2.6"></path></svg>
+                    <input class="input w-md" id="d-search" type="search" placeholder="Filter by type, hash, time" spellcheck="false" aria-label="Filter entries">
+                  </div>
+                  <select class="input w-sm" id="d-kind" aria-label="Event type">
+                    <option value="">All types</option>
+                    <option value="inference">inference</option>
+                    <option value="security_alert">security_alert</option>
+                    <option value="admin">admin</option>
+                    <option value="attestation">attestation</option>
+                    <option value="key_rotation">key_rotation</option>
+                    <option value="tamper">tamper</option>
+                    <option value="lifecycle">lifecycle</option>
+                    <option value="log_export">log_export</option>
+                    <option value="model_bundle">model_bundle</option>
+                  </select>
+                  <div class="segmented" role="group" aria-label="Entries to read">
+                    <button data-n="40" aria-pressed="true">40</button>
+                    <button data-n="100" aria-pressed="false">100</button>
+                    <button data-n="400" aria-pressed="false">400</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel-body panel-body--flush">
+                <div class="table-wrap">
+                  <table class="data responsive">
+                    <thead>
+                      <tr>
+                        <th style="width:34px"><span class="vh">Expand</span></th>
+                        <th class="t-right" style="width:72px">Seq</th>
+                        <th style="width:150px">Event</th>
+                        <th style="width:210px">Timestamp</th>
+                        <th>Entry hash</th>
+                      </tr>
+                    </thead>
+                    <tbody id="d-rows">
+                      <tr><td colspan="5" style="padding:0">
+                        <div class="empty">
+                          <span class="empty-title">Loading entries…</span>
+                        </div>
+                      </td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="panel-foot" id="d-foot">Newest last.</div>
+            </div>
+          </div>
+
+          <div class="grid" id="d-anchor-wrap" hidden>
+            <div class="panel col-12">
+              <div class="panel-head">
+                <span class="eyebrow">Anchor</span>
+                <div class="panel-tools"><button class="btn btn--sm" id="d-anchor-copy">Copy</button></div>
+              </div>
+              <div class="panel-body stack">
+                <p class="callout" data-tone="accent">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"></circle><path d="M8 7.4v3.4M8 5.3v.1" stroke-linecap="round"></path></svg>
+                  <span>Record this somewhere this operator does not control. Any later rewrite of the log before
+                    that sequence then becomes detectable by a party who holds it.</span>
+                </p>
+                <pre class="code" id="d-anchor-out"></pre>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ══ Inference console ════════════════════════════════════════════ -->
+      <section class="view view--fill" data-view="console" aria-label="Inference console">
+        <div class="console-shell">
+          <div class="console-main">
+
+            <div class="console-bar">
+              <div class="field-row">
+                <label class="label" for="c-model">Model</label>
+                <input class="input w-md" id="c-model" value="default" spellcheck="false">
+              </div>
+              <div class="field-row">
+                <label class="label" for="c-client">Client</label>
+                <input class="input w-sm" id="c-client" value="console" spellcheck="false">
+              </div>
+              <div class="field-row">
+                <label class="label" for="c-tokens">Tokens</label>
+                <input class="input w-xs" id="c-tokens" type="number" value="512" min="1">
+              </div>
+              <div class="field-row">
+                <label class="label" for="c-temp">Temp</label>
+                <input class="input w-xs" id="c-temp" type="number" value="0.7" min="0" max="2" step="0.1">
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="c-stream" checked>
+                <span class="switch-track"></span>
+                <span class="switch-label">Stream</span>
+              </label>
+              <span class="spacer"></span>
+              <button class="btn btn--sm btn--ghost" id="c-inspect" hidden>Inspector</button>
+              <button class="btn btn--sm btn--ghost" id="c-clear">Clear transcript</button>
+            </div>
+
+            <div class="transcript" id="transcript">
+              <div class="thread" id="thread">
+                <div class="empty" id="c-empty">
+                  <span class="empty-mark">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M2.5 3.5h11v7.2h-6L4.4 13V10.7H2.5Z"></path>
+                    </svg>
+                  </span>
+                  <span class="empty-title">Requests here traverse the full pipeline</span>
+                  <span class="empty-text">Identity, policy, rate limiting, output filtering and the audit log all
+                    apply. Nothing on this page bypasses any of it, and every request below is recorded.</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="composer">
+              <div class="composer-inner">
+                <div class="composer-box">
+                  <textarea id="prompt" rows="1" placeholder="Send a message through the pipeline…"></textarea>
+                  <button class="btn btn--primary" id="c-send" aria-label="Send">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M2.6 8h9.8M8.6 4.2 12.4 8l-3.8 3.8"></path>
+                    </svg>Send
+                  </button>
+                </div>
+                <div class="composer-foot">
+                  <span><kbd>Enter</kbd> send</span>
+                  <span><kbd>Shift Enter</kbd> newline</span>
+                  <span class="spacer"></span>
+                  <span id="c-session">no session</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- The receipt for the last request. -->
+          <aside class="inspector" id="inspector" aria-label="Request inspector">
+            <div class="inspector-head">
+              <span class="eyebrow">Last response</span>
+              <span class="spacer"></span>
+              <button class="icon-btn" id="c-inspect-close" aria-label="Close inspector" hidden>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.4 4.4 7.2 7.2M11.6 4.4l-7.2 7.2"></path></svg>
+              </button>
+            </div>
+            <div class="inspector-body" id="inspector-body">
+              <div class="inspector-section">
+                <span class="label">Nothing sent yet</span>
+                <p class="prose" style="font-size:var(--fs-sm)">Token usage, finish reason, the content-policy
+                  outcome and the response signature will appear here after the first request.</p>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ══ Model store ══════════════════════════════════════════════════ -->
+      <section class="view" data-view="models" aria-label="Model store">
+        <div class="page">
+          <div class="page-head">
+            <div class="page-head-text">
+              <span class="eyebrow">Operations</span>
+              <h2 class="page-title">Model store</h2>
+              <p class="page-desc">Encrypted bundles registered with this node, and the integrity state of each.
+                A bundle that fails its check stops being servable; recovery is refused while any bundle is
+                failing.</p>
+            </div>
+            <div class="page-actions">
+              <button class="btn" id="m-refresh">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"></path><path d="M13.7 2.4v3.2h-3.2"></path>
+                </svg>Refresh
+              </button>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="stat col-4" data-tone="neutral">
+              <span class="stat-label label">Registered bundles</span>
+              <span class="stat-value" id="m-count">·</span>
+              <span class="stat-sub">Under the store's integrity gate.</span>
+            </div>
+            <div class="stat col-4" id="m-integrity-tile" data-tone="neutral">
+              <span class="stat-label label">Integrity monitor</span>
+              <span class="stat-value" style="font-size:var(--fs-md);padding-top:var(--s1)">
+                <span class="badge" data-tone="neutral" id="m-integrity">·</span>
+              </span>
+              <span class="stat-sub" id="m-integrity-sub">Last check</span>
+            </div>
+            <div class="stat col-4" data-tone="neutral">
+              <span class="stat-label label">Serving</span>
+              <span class="stat-value" style="font-size:var(--fs-md);padding-top:var(--s1)" id="m-serving">·</span>
+              <span class="stat-sub">The model the runtime currently has loaded.</span>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="panel col-12">
+              <div class="panel-head"><span class="eyebrow">Bundles</span></div>
+              <div class="panel-body panel-body--flush" id="m-table"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══ API surface ══════════════════════════════════════════════════ -->
+      <section class="view" data-view="api" aria-label="API surface">
+        <div class="page">
+          <div class="page-head">
+            <div class="page-head-text">
+              <span class="eyebrow">Reference</span>
+              <h2 class="page-title">API surface</h2>
+              <p class="page-desc">Every route this node serves, and what authorises it. <code class="inline">client</code>
+                means a certificate the node has enrolled; <code class="inline">K_admin</code> means an Ed25519
+                signature under the CMK-derived admin key.</p>
+            </div>
+            <div class="page-actions">
+              <div class="input-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="7.2" cy="7.2" r="4.2"></circle><path d="m10.4 10.4 2.6 2.6"></path></svg>
+                <input class="input w-lg" id="api-search" type="search" placeholder="Filter routes" spellcheck="false" aria-label="Filter routes">
+              </div>
+            </div>
+          </div>
+
+          <div class="stack" id="api-groups">
+
+            <div class="panel" data-api-group>
+              <div class="panel-head"><span class="eyebrow">Health</span></div>
+              <div class="panel-body panel-body--flush"><div class="table-wrap"><table class="data responsive"><thead>
+                <tr><th style="width:250px">Route</th><th style="width:96px">Auth</th><th>Purpose</th></tr></thead><tbody>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/health</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">none</span></td>
+                    <td data-label="Purpose">Liveness. Reveals only that a node is listening.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/health/detailed</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Full posture: measurements, key provenance, audit state.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/health/runtime</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Recent model-runtime output, for diagnosing startup failures.</td></tr>
+              </tbody></table></div></div>
+            </div>
+
+            <div class="panel" data-api-group>
+              <div class="panel-head"><span class="eyebrow">Inference</span></div>
+              <div class="panel-body panel-body--flush"><div class="table-wrap"><table class="data responsive"><thead>
+                <tr><th style="width:250px">Route</th><th style="width:96px">Auth</th><th>Purpose</th></tr></thead><tbody>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">POST</span> <span class="mono">/v1/inference</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Generate. Returns an Ed25519-signed response over a canonical, reconstructable payload.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">POST</span> <span class="mono">/v1/inference/stream</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Generate over SSE. Filtered incrementally with a trailing holdback, so nothing the policy would remove is ever transmitted. Refused while timing normalisation is enabled.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/models</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Registered bundles and their integrity state.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">POST</span> <span class="mono">/v1/models</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="warn">K_admin</span></td>
+                    <td data-label="Purpose">Register a bundle already present in the model store.</td></tr>
+              </tbody></table></div></div>
+            </div>
+
+            <div class="panel" data-api-group>
+              <div class="panel-head"><span class="eyebrow">Assurance</span></div>
+              <div class="panel-body panel-body--flush"><div class="table-wrap"><table class="data responsive"><thead>
+                <tr><th style="width:250px">Route</th><th style="width:96px">Auth</th><th>Purpose</th></tr></thead><tbody>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/attestation</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">A signed measurement report, bound to a nonce the caller chose.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">POST</span> <span class="mono">/v1/attestation/verify</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Check a report against operator-pinned measurements. The caller supplies only a nonce.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/audit/verify</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Recompute and check the whole chain.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/audit/tail</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">The most recent entries. The read is itself recorded.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/v1/audit/anchor</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">client</span></td>
+                    <td data-label="Purpose">Signed chain head. Publish it to make earlier rewrites detectable.</td></tr>
+              </tbody></table></div></div>
+            </div>
+
+            <div class="panel" data-api-group>
+              <div class="panel-head"><span class="eyebrow">Administration</span></div>
+              <div class="panel-body panel-body--flush"><div class="table-wrap"><table class="data responsive"><thead>
+                <tr><th style="width:250px">Route</th><th style="width:96px">Auth</th><th>Purpose</th></tr></thead><tbody>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">POST</span> <span class="mono">/v1/admin/quarantine</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="warn">K_admin</span></td>
+                    <td data-label="Purpose">Stop serving until an operator recovers.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">POST</span> <span class="mono">/v1/admin/recover</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="warn">K_admin</span></td>
+                    <td data-label="Purpose">Resume serving. Refused while any bundle fails integrity.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">POST</span> <span class="mono">/v1/admin/suspend-client</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="warn">K_admin</span></td>
+                    <td data-label="Purpose">Suspend one client for a period.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="stop">POST</span> <span class="mono">/v1/admin/teardown</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="warn">K_admin</span></td>
+                    <td data-label="Purpose">Zeroize key material and stop. There is no undo.</td></tr>
+                <tr data-api><td data-label="Route"><span class="badge badge--bare" data-tone="accent">GET</span> <span class="mono">/metrics</span></td>
+                    <td data-label="Auth"><span class="badge badge--bare" data-tone="neutral">loopback</span></td>
+                    <td data-label="Purpose">Prometheus exposition. Refused from any non-local peer.</td></tr>
+              </tbody></table></div></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><span class="eyebrow">Authorising an admin command</span></div>
+              <div class="panel-body stack">
+                <p class="prose">Admin routes require an Ed25519 signature over
+                  <code class="inline">CORDON_ADMIN:{action}:{params}</code> under the CMK-derived admin key.
+                  Produce one with <code class="inline">cordon-keygen admin-sign</code>. With no Client Master Key
+                  provisioned, the admin API is refused outright rather than falling back to a weaker check.</p>
+              </div>
+            </div>
+
+            <p class="empty" id="api-empty" hidden>
+              <span class="empty-title">No route matches that filter</span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /viewport -->
+
+    <footer class="statusbar">
+      <span class="status-cell"><b>Node</b> <span id="f-node">·</span></span>
+      <span class="status-rule"></span>
+      <span class="status-cell"><b>Mode</b> <span id="f-mode">·</span></span>
+      <span class="status-rule"></span>
+      <span class="status-cell"><b>Uptime</b> <span id="f-uptime">·</span></span>
+      <span class="status-rule"></span>
+      <span class="status-cell"><b>Cordon</b> <span id="f-version">·</span></span>
+      <span class="spacer"></span>
+      <span class="status-cell" id="f-sync">·</span>
+      <span class="status-rule"></span>
+      <span class="status-cell">Loopback listener · no authentication of its own</span>
+    </footer>
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<div class="scrim" id="scrim"></div>
+
+<!-- ══ Command palette ═══════════════════════════════════════════════════ -->
+<div class="palette" id="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="palette-input-wrap">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="7.2" cy="7.2" r="4.2"></circle><path d="m10.4 10.4 2.6 2.6"></path></svg>
+    <input id="pal-input" type="text" placeholder="Go to a view, or run a command…" spellcheck="false" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="pal-list">
+  </div>
+  <div class="palette-list" id="pal-list" role="listbox" aria-label="Commands"></div>
+  <div class="palette-foot">
+    <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+    <span><kbd>Enter</kbd> run</span>
+    <span><kbd>Esc</kbd> close</span>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<span class="vh" id="live" role="status" aria-live="polite"></span>
+
+<script>
+(() => {
+'use strict';
+
+/* ===========================================================================
+   Every request this page makes is same-origin: inference is proxied through
+   the console's own listener rather than reaching across to the API port,
+   which is what lets the content-security-policy stay at connect-src 'self'.
+   Node state arrives as JSON and is written with textContent, never
+   interpolated into markup. A node ID or a model name is attacker-adjacent
+   data, and string substitution into HTML is how it becomes an injection.
+   ========================================================================= */
+
+const $  = (id) => document.getElementById(id);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+/* -- Icons -----------------------------------------------------------------
+   Inline paths, never fetched. Written as markup only from these constants;
+   no value from the network ever reaches innerHTML. */
+const ICON = {
+  check:  '<path d="M2.8 8.4 6 11.6l7.2-7.2"/>',
+  cross:  '<path d="m4.4 4.4 7.2 7.2M11.6 4.4l-7.2 7.2"/>',
+  alert:  '<path d="M8 4.4v4.3M8 11v.1"/>',
+  minus:  '<path d="M4.2 8h7.6"/>',
+  copy:   '<rect x="5.4" y="5.4" width="8.2" height="8.2" rx="1.4"/><path d="M10.6 5.4V3.8a1.4 1.4 0 0 0-1.4-1.4H3.8a1.4 1.4 0 0 0-1.4 1.4v5.4a1.4 1.4 0 0 0 1.4 1.4h1.6"/>',
+  chev:   '<path d="m6.4 3.8 4.2 4.2-4.2 4.2"/>',
+  info:   '<circle cx="8" cy="8" r="6"/><path d="M8 7.4v3.4M8 5.3v.1"/>',
+  box:    '<path d="M8 1.9 14 5v6l-6 3.1L2 11V5Z"/><path d="M2 5l6 3.1L14 5M8 8.1v6"/>',
+  spark:  '<path d="M8.6 1.8 3.4 9.1h4L7 14.2l5.6-7.5h-4Z"/>',
+};
+const svg = (name, w = 14) =>
+  `<svg viewBox="0 0 16 16" width="${w}" height="${w}" fill="none" stroke="currentColor" ` +
+  `stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+};
+
+/* -- Formatting ----------------------------------------------------------- */
+
+const num = (n) => (n == null ? '·' : Number(n).toLocaleString('en-US'));
+
+const shorten = (s, head = 10, tail = 8) =>
+  !s ? '·' : (s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`);
+
+const duration = (secs) => {
+  if (secs == null) return '·';
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60), s = Math.floor(secs % 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+};
+
+const bytes = (n) => {
+  if (!n) return '·';
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
+};
+
+const clockOf = (iso) => {
+  if (!iso) return '·';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? String(iso) : d.toISOString().replace('T', ' ').replace('Z', 'Z');
+};
+
+/* -- Writers ---------------------------------------------------------------
+   A polled value that changed gets a brief flash. Under a five-second poll a
+   digit ticking over is otherwise easy to miss entirely, and "did that number
+   just move" is the question an operator is actually asking. */
+function setText(node, value, { flash = true } = {}) {
+  if (!node) return;
+  const next = value == null || value === '' ? '·' : String(value);
+  if (node.textContent === next) return;
+  const had = node.textContent && node.textContent !== '·';
+  node.textContent = next;
+  if (flash && had) reflash(node);
+}
+
+function reflash(node) {
+  node.classList.remove('flash');
+  void node.offsetWidth;
+  node.classList.add('flash');
+}
+
+function setBadge(node, text, tone) {
+  if (!node) return;
+  const changed = node.textContent !== text || node.dataset.tone !== tone;
+  node.textContent = text ?? '·';
+  node.dataset.tone = tone ?? 'neutral';
+  if (changed) reflash(node);
+}
+
+function badge(text, tone, bare) {
+  const b = el('span', bare ? 'badge badge--bare' : 'badge', text);
+  b.dataset.tone = tone ?? 'neutral';
+  return b;
+}
+
+/* A truncated key is not a key. Show a short form, keep the whole value one
+   click, and one selection, away. */
+function setCopyable(node, value, display) {
+  if (!node) return;
+  node.textContent = '';
+  if (!value) { node.textContent = '·'; return; }
+
+  const wrap = el('span', 'copyable');
+  const text = el('span', 'copyable-text mono', display ?? shorten(value));
+  wrap.appendChild(text);
+  wrap.appendChild(copyButton(value, () => { text.textContent = value; }));
+  node.appendChild(wrap);
+}
+
+function copyButton(value, onFallback) {
+  const b = el('button', 'copy-btn');
+  b.type = 'button';
+  b.title = 'Copy the full value';
+  b.setAttribute('aria-label', 'Copy the full value');
+  b.innerHTML = svg('copy', 11);
+  b.addEventListener('click', async () => {
+    const ok = await copyText(value);
+    if (!ok) { onFallback?.(); toast('Clipboard unavailable; the value is selected instead', 'stop'); return; }
+    b.innerHTML = svg('check', 11);
+    b.setAttribute('data-copied', '');
+    setTimeout(() => { b.innerHTML = svg('copy', 11); b.removeAttribute('data-copied'); }, 1300);
+  });
+  return b;
+}
+
+async function copyText(value) {
+  try { await navigator.clipboard.writeText(value); return true; }
+  catch { return false; }
+}
+
+async function copyAnd(value, message) {
+  if (!value) { toast('That value is not available yet', 'stop'); return; }
+  if (await copyText(value)) toast(message, 'ok');
+  else toast('Clipboard unavailable on this listener; select the value and copy manually', 'stop');
+}
+
+/* -- Fetch ---------------------------------------------------------------- */
+
+async function jsonOf(res) {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${body.error ?? res.status}: ${body.message ?? 'request failed'}`);
+  return body;
+}
+
+const asConsole = { cache: 'no-store', headers: { 'x-client-id': 'console' } };
+
+/* A 128-bit nonce, the way a client would issue one. */
+function freshNonce() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+/* -- Toasts --------------------------------------------------------------- */
+
+function toast(message, tone = 'info') {
+  const host = $('toasts');
+  const t = el('div', 'toast');
+  t.dataset.tone = tone;
+  t.innerHTML = svg(tone === 'ok' ? 'check' : tone === 'stop' ? 'alert' : 'info', 14);
+  t.appendChild(el('span', null, message));
+  host.appendChild(t);
+  $('live').textContent = message;
+  setTimeout(() => {
+    t.setAttribute('data-leaving', '');
+    setTimeout(() => t.remove(), 220);
+  }, 4200);
+}
+
+/* -- Theme ---------------------------------------------------------------- */
+
+const THEME_KEY = 'cordon.theme';
+
+function readStored(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function writeStored(key, value) { try { localStorage.setItem(key, value); } catch { /* private mode */ } }
+
+function applyTheme(mode) {
+  if (mode === 'dark' || mode === 'light') document.documentElement.setAttribute('data-theme', mode);
+  else document.documentElement.removeAttribute('data-theme');
+}
+
+function currentTheme() {
+  const set = document.documentElement.getAttribute('data-theme');
+  if (set) return set;
+  return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+applyTheme(readStored(THEME_KEY));
+
+$('theme-btn').addEventListener('click', () => {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  writeStored(THEME_KEY, next);
+  toast(`Switched to the ${next === 'dark' ? 'Ink' : 'Paper'} scheme`);
+});
+
+/* -- Navigation -----------------------------------------------------------
+   The view lives in the URL fragment, so a reload, or a link pasted into a
+   runbook, lands where the operator left off. */
+
+const VIEWS = {
+  overview:    { section: 'Posture',    title: 'Node posture' },
+  attestation: { section: 'Assurance',  title: 'Challenge this node' },
+  audit:       { section: 'Assurance',  title: 'Audit chain' },
+  console:     { section: 'Operations', title: 'Inference console' },
+  models:      { section: 'Operations', title: 'Model store' },
+  api:         { section: 'Reference',  title: 'API surface' },
+};
+
+let currentView = 'overview';
+let auditLoaded = false;
+
+function goto(view, { push = true } = {}) {
+  if (!VIEWS[view]) view = 'overview';
+  currentView = view;
+
+  $$('.view').forEach((v) => {
+    if (v.dataset.view === view) v.setAttribute('data-active', '');
+    else v.removeAttribute('data-active');
+  });
+  $$('.nav-item').forEach((b) => {
+    if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  });
+
+  setText($('crumb-section'), VIEWS[view].section, { flash: false });
+  setText($('crumb-title'), VIEWS[view].title, { flash: false });
+  document.title = `${VIEWS[view].title} · Cordon`;
+  if (push && location.hash.slice(1) !== view) {
+    // Some embedded viewers hand the page a History that refuses
+    // replaceState. Losing the fragment is survivable; losing navigation is
+    // not, so this never throws out of goto().
+    try { history.replaceState(null, '', `#${view}`); } catch { location.hash = view; }
+  }
+
+  closeRail();
+  $('content').scrollTop = 0;
+  // The inference console owns its own scrolling. The stylesheet says so with
+  // :has(), and this says it again for engines that do not support it.
+  $('content').style.overflowY = view === 'console' ? 'hidden' : 'auto';
+
+  if (view === 'console') setTimeout(() => $('prompt').focus(), 30);
+  // Loading the log on first view rather than on every poll keeps reading the
+  // audit log, which is itself audited, an act rather than a background habit that
+  // fills the log with records of the console looking at it.
+  if (view === 'audit' && !auditLoaded) { auditLoaded = true; loadEntries(); }
+  if (view === 'models') loadModels();
+}
+
+$$('.nav-item').forEach((b) => b.addEventListener('click', () => goto(b.dataset.view)));
+$$('[data-goto]').forEach((b) => b.addEventListener('click', () => goto(b.dataset.goto)));
+addEventListener('hashchange', () => goto(location.hash.slice(1), { push: false }));
+
+/* -- Rail fold ------------------------------------------------------------
+   The rail is folded to its icons either because the operator folded it or
+   because the window is too narrow to spend 238px on navigation. Only the
+   first is the operator's to set, so below that width the button is hidden
+   and the stored preference is kept but not applied: widen the window and
+   the rail returns to the state it was left in. */
+
+const RAIL_KEY = 'cordon.rail';
+const drawerQuery = matchMedia('(max-width: 760px)');
+const crampedQuery = matchMedia('(max-width: 1180px)');
+
+function syncRail() {
+  const folded = readStored(RAIL_KEY) === 'mini';
+  const mini = !drawerQuery.matches && (crampedQuery.matches || folded);
+  document.documentElement.setAttribute('data-rail', mini ? 'mini' : 'wide');
+
+  // A folded nav item is an icon with a `display: none` label, which leaves
+  // the button with no accessible name and no tooltip at all. Unfolded, the
+  // label is right there and a tooltip repeating it is just noise.
+  $$('.nav-item').forEach((item) => {
+    if (mini) item.title = item.querySelector('.nav-label').textContent;
+    else item.removeAttribute('title');
+  });
+
+  const button = $('rail-collapse');
+  const verb = mini ? 'Expand' : 'Collapse';
+  button.setAttribute('aria-expanded', String(!mini));
+  button.setAttribute('aria-label', verb + ' the sidebar');
+  button.title = verb + ' the sidebar (Ctrl \\)';
+  button.querySelector('span').textContent = verb;
+}
+
+function toggleRail() {
+  if (crampedQuery.matches) {
+    toast('The sidebar follows the window at this width');
+    return;
+  }
+  writeStored(RAIL_KEY, readStored(RAIL_KEY) === 'mini' ? 'wide' : 'mini');
+  syncRail();
+}
+
+$('rail-collapse').addEventListener('click', toggleRail);
+drawerQuery.addEventListener('change', syncRail);
+crampedQuery.addEventListener('change', syncRail);
+syncRail();
+
+/* -- Rail drawer (small screens) ------------------------------------------ */
+
+function openRail() {
+  $('rail').setAttribute('data-open', '');
+  $('scrim').setAttribute('data-open', '');
+  $('rail-toggle').setAttribute('aria-expanded', 'true');
+}
+function closeRail() {
+  $('rail').removeAttribute('data-open');
+  if (!$('palette').hasAttribute('data-open')) $('scrim').removeAttribute('data-open');
+  $('rail-toggle').setAttribute('aria-expanded', 'false');
+}
+$('rail-toggle').addEventListener('click', () =>
+  ($('rail').hasAttribute('data-open') ? closeRail() : openRail()));
+$('scrim').addEventListener('click', () => { closeRail(); closePalette(); });
+
+/* -- Command palette ------------------------------------------------------
+   This console has no password: reachability is its access control, and the
+   keyboard is the fast path for someone who already has it. */
+
+const COMMANDS = [
+  { group: 'Go to', label: 'Node posture',        hint: 'overview',    icon: 'chev',  run: () => goto('overview') },
+  { group: 'Go to', label: 'Attestation',         hint: 'attestation', icon: 'chev',  run: () => goto('attestation') },
+  { group: 'Go to', label: 'Audit chain',         hint: 'audit',       icon: 'chev',  run: () => goto('audit') },
+  { group: 'Go to', label: 'Inference console',   hint: 'console',     icon: 'chev',  run: () => goto('console') },
+  { group: 'Go to', label: 'Model store',         hint: 'models',      icon: 'chev',  run: () => goto('models') },
+  { group: 'Go to', label: 'API surface',         hint: 'api',         icon: 'chev',  run: () => goto('api') },
+
+  { group: 'Run',   label: 'Request an attestation report', icon: 'spark', run: () => { goto('attestation'); $('a-fetch').click(); } },
+  { group: 'Run',   label: 'Verify the whole audit chain',  icon: 'check', run: () => { goto('audit'); $('d-verify').click(); } },
+  { group: 'Run',   label: 'Take an audit anchor',          icon: 'spark', run: () => { goto('audit'); $('d-anchor').click(); } },
+  { group: 'Run',   label: 'Refresh node status',           icon: 'spark', run: () => refresh(true) },
+
+  { group: 'Copy',  label: 'Copy the chain head',           icon: 'copy',  run: () => copyAnd(latest?.audit?.chain_head, 'Chain head copied') },
+  { group: 'Copy',  label: 'Copy the log verifying key',    icon: 'copy',  run: () => copyAnd(latest?.audit?.log_verifying_key, 'Verifying key copied') },
+  { group: 'Copy',  label: 'Copy the node measurement',     icon: 'copy',  run: () => copyAnd(latest?.trust?.mrenclave, 'Measurement copied') },
+
+  { group: 'View',  label: 'Switch colour scheme',          icon: 'spark', run: () => $('theme-btn').click() },
+  { group: 'View',  label: 'Collapse or expand the sidebar', icon: 'spark', run: toggleRail },
+];
+
+let palItems = [], palIndex = 0;
+
+function renderPalette(query) {
+  const list = $('pal-list');
+  list.textContent = '';
+  const q = query.trim().toLowerCase();
+  const matches = COMMANDS.filter((c) =>
+    !q || c.label.toLowerCase().includes(q) || c.group.toLowerCase().includes(q) ||
+    (c.hint ?? '').includes(q));
+
+  palItems = matches;
+  palIndex = 0;
+
+  if (!matches.length) {
+    list.appendChild(el('p', 'empty-text', 'Nothing matches that.'));
+    return;
+  }
+
+  let group = null, host = list;
+  matches.forEach((cmd, i) => {
+    if (cmd.group !== group) {
+      group = cmd.group;
+      const g = el('div', 'palette-group');
+      g.appendChild(el('span', 'label', group));
+      list.appendChild(g);
+      host = g;
+    }
+    const b = el('button', 'palette-item');
+    b.type = 'button';
+    b.id = `pal-opt-${i}`;
+    b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', 'false');
+    b.innerHTML = svg(cmd.icon ?? 'chev', 15);
+    b.appendChild(el('span', null, cmd.label));
+    if (cmd.hint) b.appendChild(el('span', 'palette-hint', `#${cmd.hint}`));
+    b.addEventListener('click', () => { closePalette(); cmd.run(); });
+    b.addEventListener('mousemove', () => { palIndex = i; markPalette(); });
+    host.appendChild(b);
+  });
+  markPalette();
+}
+
+function markPalette() {
+  const nodes = $$('.palette-item');
+  nodes.forEach((n, i) => {
+    const active = i === palIndex;
+    n.setAttribute('aria-selected', String(active));
+    if (active) { n.setAttribute('data-sel', ''); n.scrollIntoView({ block: 'nearest' }); }
+    else n.removeAttribute('data-sel');
+  });
+  const active = nodes[palIndex];
+  if (active) $('pal-input').setAttribute('aria-activedescendant', active.id);
+  else $('pal-input').removeAttribute('aria-activedescendant');
+}
+
+function openPalette() {
+  $('palette').setAttribute('data-open', '');
+  $('scrim').setAttribute('data-open', '');
+  $('pal-input').value = '';
+  renderPalette('');
+  $('pal-input').focus();
+}
+function closePalette() {
+  $('palette').removeAttribute('data-open');
+  if (!$('rail').hasAttribute('data-open')) $('scrim').removeAttribute('data-open');
+}
+
+$('open-palette').addEventListener('click', openPalette);
+$('pal-input').addEventListener('input', (e) => renderPalette(e.target.value));
+
+$('pal-input').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); palIndex = Math.min(palIndex + 1, palItems.length - 1); markPalette(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); palIndex = Math.max(palIndex - 1, 0); markPalette(); }
+  else if (e.key === 'Enter') { e.preventDefault(); const cmd = palItems[palIndex]; if (cmd) { closePalette(); cmd.run(); } }
+});
+
+addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key === '\\') { e.preventDefault(); toggleRail(); return; }
+  if (e.key === 'Escape') { closePalette(); closeRail(); }
+});
+
+/* ===========================================================================
+   Node status
+   ========================================================================= */
+
+let latest = null;
+let lastOk = 0;
+let failures = 0;
+let pollTimer = null;
+const lat50 = [], lat99 = [];
+
+const stateTone = (status) => ({
+  healthy: 'ok', degraded: 'warn', quarantine: 'stop',
+  locked: 'stop', zeroized: 'stop', initializing: 'neutral',
+}[status] ?? 'neutral');
+
+function setConnection(state, text) {
+  const pip = $('conn-pip');
+  pip.dataset.state = state;
+  document.documentElement.dataset.conn = state;
+  setText($('conn-text'), text, { flash: false });
+}
+
+async function refresh(manual = false) {
+  let data;
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch {
+    failures += 1;
+    setConnection(failures > 2 ? 'offline' : 'stale', failures > 2 ? 'unreachable' : 'retrying');
+    setBadge($('top-state'), 'unreachable', 'stop');
+    if (manual) toast('The node did not answer', 'stop');
+    schedulePoll();
+    return;
+  }
+
+  failures = 0;
+  lastOk = Date.now();
+  latest = data;
+  setConnection('live', 'live');
+  render(data);
+  if (manual) toast('Status refreshed', 'ok');
+  schedulePoll();
+}
+
+/* Back off rather than hammering a node that is down; a console retrying
+   every five seconds against a quarantined node is just noise in its log. */
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const delay = failures === 0 ? 5000 : Math.min(5000 * 2 ** failures, 60000);
+  pollTimer = setTimeout(() => refresh(), delay);
+}
+
+function render(d) {
+  const status = d.status ?? 'unknown';
+  const tone = stateTone(status);
+
+  setBadge($('top-state'), status, tone);
+  $('s-state').dataset.tone = tone;
+  setText($('s-state-v'), status);
+  // Uptime moves on every poll by definition; flashing it would train the
+  // operator to ignore the flash everywhere else.
+  setText($('s-state-sub'), `Up ${duration(d.uptime_seconds)} · ${d.mode ?? 'unknown'} mode`, { flash: false });
+
+  /* Load */
+  const active = d.runtime?.active_requests ?? 0;
+  const capacity = d.runtime?.max_concurrent ?? 0;
+  setText($('s-load-v'), capacity ? `${active}/${capacity}` : String(active));
+  setText($('s-load-sub'), `${d.runtime?.active_sessions ?? 0} live session${(d.runtime?.active_sessions ?? 0) === 1 ? '' : 's'}`);
+  const pct = capacity ? Math.min(100, (active / capacity) * 100) : 0;
+  const meter = $('s-load-meter');
+  meter.style.width = `${pct}%`;
+  meter.dataset.tone = pct > 90 ? 'stop' : pct > 70 ? 'warn' : 'accent';
+  $('s-load').dataset.tone = pct > 90 ? 'stop' : 'neutral';
+
+  /* Audit */
+  setText($('s-audit-v'), num(d.audit?.entries_total ?? 0));
+  const cv = d.audit?.chain_valid;
+  const chainText = cv === true ? 'intact' : cv === false ? 'broken' : 'not yet checked';
+  const chainTone = cv === true ? 'ok' : cv === false ? 'stop' : 'neutral';
+  setBadge($('s-audit-chain'), chainText, chainTone);
+  setBadge($('d-verdict'), chainText, chainTone);
+  $('d-verdict-tile').dataset.tone = chainTone;
+  $('s-audit').dataset.tone = cv === false ? 'stop' : 'neutral';
+  setText($('d-entries'), num(d.audit?.entries_total ?? 0));
+  setCopyable($('d-head'), d.audit?.chain_head, shorten(d.audit?.chain_head, 16, 10));
+
+  const auditTag = $('nav-audit-tag');
+  auditTag.textContent = num(d.audit?.entries_total ?? 0);
+  auditTag.dataset.tone = cv === false ? 'stop' : '';
+
+  /* Runtime */
+  const ready = Boolean(d.runtime?.ready);
+  const placeholder = Boolean(d.runtime?.is_placeholder);
+  setBadge($('o-runtime-badge'), placeholder ? 'placeholder' : ready ? 'reachable' : 'unreachable',
+           placeholder ? 'warn' : ready ? 'ok' : 'stop');
+  setText($('o-backend'), d.runtime?.backend);
+  setText($('o-model'), d.runtime?.model ?? 'none');
+  setText($('o-sessions'), num(d.runtime?.active_sessions ?? 0));
+  const p50 = d.runtime?.latency_ms_p50 ?? 0, p99 = d.runtime?.latency_ms_p99 ?? 0;
+  setText($('o-latency'), `${num(p50)} ms / ${num(p99)} ms`);
+
+  pushLatency(p50, p99);
+
+  const note = $('o-runtime-note');
+  note.dataset.tone = placeholder ? 'warn' : 'neutral';
+  note.textContent = '';
+  note.innerHTML = svg(placeholder ? 'alert' : 'info', 15);
+  note.appendChild(el('span', null, placeholder
+    ? 'No model runtime is attached. Responses are clearly-labelled placeholders, not generated text. Set runtime.backend = "supervised" to serve a model.'
+    : 'The runtime is bound to loopback on an ephemeral port with its own web UI unreachable. Cordon is the only network surface.'));
+
+  /* Ledger */
+  renderLedger(d);
+
+  /* Model store */
+  renderBundles(d);
+  renderIntegrity(d);
+
+  /* Status bar */
+  setText($('f-node'), d.node_id, { flash: false });
+  setText($('f-mode'), d.mode, { flash: false });
+  setText($('f-uptime'), duration(d.uptime_seconds), { flash: false });
+  setText($('f-version'), d.cordon_version ? `v${d.cordon_version}` : '·', { flash: false });
+}
+
+/* -- The assurance ledger --------------------------------------------------
+   Four claims, verdicted independently. The product's whole position is that
+   one green light cannot honestly stand for four different facts, so each
+   one carries its own verdict and its own consequence, in words. */
+function renderLedger(d) {
+  const cmk = d.trust?.key_provenance === 'cmk_derived';
+  const hw = Boolean(d.trust?.hardware_measurements);
+  const pinned = Boolean(d.trust?.measurements_pinned);
+  const cv = d.audit?.chain_valid;
+
+  const claims = [
+    {
+      claim: 'Signatures verify against a key the operator cannot forge',
+      tone: cmk ? 'ok' : 'stop',
+      verdict: cmk
+        ? 'Keys are derived from the Client Master Key. Any party holding it can check this node\'s signatures without trusting the node.'
+        : 'Signing keys were generated at boot, so the node self-certifies. Audit and response signatures carry no cross-party guarantee until a Client Master Key is provisioned.',
+      badge: cmk ? 'cmk-derived' : 'self-signed',
+      goto: 'attestation',
+    },
+    {
+      claim: 'Measurements come from hardware',
+      tone: hw ? 'ok' : 'warn',
+      verdict: hw
+        ? `Measurements are taken from the platform (${d.trust?.measurement_source ?? 'hardware'}), not from this node's own description of itself.`
+        : 'Measurements are derived from this node\'s configuration. They attest that Cordon is running the expected configuration and nothing about the platform underneath it. An attacker with code execution here can reproduce them exactly.',
+      badge: d.trust?.measurement_source ?? 'unknown',
+      goto: 'attestation',
+    },
+    {
+      claim: 'Expected measurements are pinned',
+      tone: pinned ? 'ok' : 'stop',
+      verdict: pinned
+        ? 'A report can be checked against values the operator committed in advance.'
+        : 'Nothing is pinned, so a report cannot be verified against anything. Capture the measurements into [attestation.expected] and restart.',
+      badge: pinned ? 'pinned' : 'nothing pinned',
+      goto: 'attestation',
+    },
+    {
+      claim: 'The audit chain verifies end to end',
+      tone: cv === true ? 'ok' : cv === false ? 'stop' : 'warn',
+      verdict: cv === true
+        ? `${num(d.audit?.entries_total ?? 0)} entries hash-chained and signed, last check intact.`
+        : cv === false
+          ? 'The chain does not verify. Entries have been rewritten, deleted or renumbered since they were written.'
+          : 'The chain has not been checked in this process. Verification recomputes every hash and checks every signature.',
+      badge: cv === true ? 'intact' : cv === false ? 'broken' : 'unchecked',
+      goto: 'audit',
+    },
+  ];
+
+  const established = claims.filter((c) => c.tone === 'ok').length;
+  const assuranceTone = established === 4 ? 'ok' : established >= 2 ? 'warn' : 'stop';
+  $('s-assurance').dataset.tone = assuranceTone;
+  const assuranceValue = $('s-assurance-v');
+  if (assuranceValue.dataset.v !== String(established)) {
+    const first = assuranceValue.dataset.v === undefined;
+    assuranceValue.dataset.v = String(established);
+    assuranceValue.textContent = String(established);
+    assuranceValue.appendChild(el('span', 'stat-unit', '/ 4'));
+    if (!first) reflash(assuranceValue);
+  }
+  setText($('s-assurance-sub'),
+    established === 4 ? 'Every claim below is independently checkable.'
+      : `${4 - established} claim${4 - established === 1 ? '' : 's'} a third party could not check.`);
+  setText($('ledger-summary'), `${established} of 4 established`, { flash: false });
+
+  const attTag = $('nav-att-tag');
+  attTag.hidden = pinned && hw;
+  attTag.dataset.tone = pinned ? 'warn' : 'stop';
+
+  // Rebuilding four rows every five seconds would throw away focus and hover
+  // for no gain: the verdicts only move when the facts do.
+  const signature = claims.map((c) => `${c.tone}|${c.badge}|${c.verdict}`).join('~');
+  const host = $('ledger');
+  if (host.dataset.sig === signature) return;
+  host.dataset.sig = signature;
+
+  host.textContent = '';
+  for (const c of claims) {
+    const item = el('button', 'ledger-item');
+    item.type = 'button';
+    item.dataset.tone = c.tone;
+    item.addEventListener('click', () => goto(c.goto));
+
+    const mark = el('span', 'ledger-mark');
+    mark.innerHTML = svg(c.tone === 'ok' ? 'check' : c.tone === 'stop' ? 'cross' : 'alert', 13);
+
+    const body = el('div');
+    body.appendChild(el('div', 'ledger-claim', c.claim));
+    body.appendChild(el('div', 'ledger-verdict', c.verdict));
+
+    const side = el('div', 'ledger-side');
+    side.appendChild(badge(c.badge, c.tone));
+    const go = el('span', 'ledger-go');
+    go.innerHTML = svg('chev', 14);
+    side.appendChild(go);
+
+    item.append(mark, body, side);
+    host.appendChild(item);
+  }
+}
+
+/* -- Latency sparkline ---------------------------------------------------- */
+
+function pushLatency(p50, p99) {
+  lat50.push(p50); lat99.push(p99);
+  while (lat50.length > 60) { lat50.shift(); lat99.shift(); }
+
+  const W = 240, H = 34;
+  const peak = Math.max(1, ...lat99, ...lat50);
+  const scale = peak * 1.18;
+  setText($('o-spark-max'), `peak ${num(Math.round(peak))} ms`, { flash: false });
+
+  const path = (series) => {
+    if (series.length < 2) return '';
+    const step = W / Math.max(1, series.length - 1);
+    return series.map((v, i) => `${i ? 'L' : 'M'}${(i * step).toFixed(1)} ${(H - (v / scale) * H).toFixed(1)}`).join(' ');
+  };
+
+  const p50d = path(lat50);
+  $('o-spark-p50').setAttribute('d', p50d);
+  $('o-spark-p99').setAttribute('d', path(lat99));
+  $('o-spark-area').setAttribute('d', p50d ? `${p50d} L${W} ${H} L0 ${H} Z` : '');
+}
+
+/* -- Bundles -------------------------------------------------------------- */
+
+function bundleTone(status) {
+  return status === 'ready' ? 'ok' : status === 'tampered' ? 'stop' : 'neutral';
+}
+
+function bundleTable(bundles, { full }) {
+  const wrap = el('div', 'table-wrap');
+  const table = el('table', 'data responsive');
+  const thead = el('thead');
+  const hr = el('tr');
+  const cols = full
+    ? ['Bundle', 'Status', 'Size', 'Integrity']
+    : ['Bundle', 'Status', 'Size'];
+  cols.forEach((c) => { const th = el('th', null, c); hr.appendChild(th); });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = el('tbody');
+  for (const b of bundles) {
+    const tr = el('tr');
+
+    const idCell = el('td', 'cell-strong mono');
+    idCell.dataset.label = 'Bundle';
+    idCell.appendChild(el('span', 'trunc', b.bundle_id));
+    tr.appendChild(idCell);
+
+    const statusCell = el('td');
+    statusCell.dataset.label = 'Status';
+    statusCell.appendChild(badge(b.status, bundleTone(b.status)));
+    tr.appendChild(statusCell);
+
+    const sizeCell = el('td', 'num', bytes(b.size_bytes));
+    sizeCell.dataset.label = 'Size';
+    tr.appendChild(sizeCell);
+
+    if (full) {
+      const okCell = el('td');
+      okCell.dataset.label = 'Integrity';
+      okCell.appendChild(badge(b.integrity_ok ? 'confirmed' : 'unconfirmed', b.integrity_ok ? 'ok' : 'warn'));
+      tr.appendChild(okCell);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function emptyBundles() {
+  const wrap = el('div', 'empty');
+  const mark = el('span', 'empty-mark');
+  mark.innerHTML = svg('box', 16);
+  wrap.appendChild(mark);
+  wrap.appendChild(el('span', 'empty-title', 'No encrypted bundles registered'));
+  wrap.appendChild(el('span', 'empty-text',
+    'The runtime is serving a model file directly. Package one with cordon-provision to bring it under the store\'s integrity gate.'));
+  return wrap;
+}
+
+function renderBundles(d) {
+  const bundles = d.bundles ?? [];
+  const host = $('o-bundles');
+  $('nav-models-tag').textContent = String(bundles.length);
+
+  const signature = JSON.stringify(bundles);
+  if (host.dataset.sig === signature) return;
+  host.dataset.sig = signature;
+  host.textContent = '';
+  host.appendChild(bundles.length ? bundleTable(bundles.slice(0, 5), { full: false }) : emptyBundles());
+  $('nav-models-tag').textContent = String(bundles.length);
+}
+
+$('o-refresh').addEventListener('click', () => refresh(true));
+
+/* -- Runtime output --------------------------------------------------------
+   When the runtime will not start, its own stderr is the only thing that says
+   why. It sits behind a disclosure because it is diagnostic rather than
+   posture, and because a runtime under load is noisy. */
+$('o-logs-toggle').addEventListener('click', async () => {
+  const button = $('o-logs-toggle');
+  const box = $('o-logs');
+  const open = button.getAttribute('aria-expanded') === 'true';
+
+  if (open) {
+    box.hidden = true;
+    button.setAttribute('aria-expanded', 'false');
+    return;
+  }
+
+  box.hidden = false;
+  box.textContent = 'Loading…';
+  button.setAttribute('aria-expanded', 'true');
+  try {
+    const data = await jsonOf(await fetch('/api/runtime', asConsole));
+    const lines = data.recent_output ?? [];
+    box.textContent = lines.length
+      ? lines.join('\n')
+      : 'The runtime has produced no output. With runtime.backend = "none" there is no child process to produce any.';
+  } catch (e) {
+    box.textContent = String(e.message ?? e);
+  }
+});
+
+/* ===========================================================================
+   Attestation
+   ========================================================================= */
+
+let pinBlock = null, rawReport = null;
+
+function setFact(index, { badgeText, tone, verdict }) {
+  const item = $$('.ledger-item', $('a-facts'))[index];
+  if (!item) return;
+  item.dataset.tone = tone;
+  const mark = item.querySelector('.ledger-mark');
+  mark.innerHTML = svg(tone === 'ok' ? 'check' : tone === 'stop' ? 'cross' : 'alert', 13);
+  const b = item.querySelector('.badge');
+  b.textContent = badgeText;
+  b.dataset.tone = tone;
+  if (verdict) item.querySelector('.ledger-verdict').textContent = verdict;
+}
+
+function renderAttestation(body, nonce) {
+  const report = body.report ?? {};
+  const tee = report.combined?.tee_quote ?? {};
+  const tpm = report.combined?.tpm_quote ?? {};
+  const evidence = report.combined?.platform_evidence ?? { kind: 'none' };
+
+  const source = tee.measurement_source ?? 'unknown';
+  const hardware = source === 'tpm2' || source === 'sev_snp';
+  // A quote is present when there is something a verifier could actually
+  // check: a confidential-VM report, or a TPM quote carrying the message it
+  // signed together with the signature over it.
+  const confidential = Boolean(evidence.kind) && evidence.kind !== 'none';
+  const tpmQuote = Boolean(tpm.attest_message_hex) && Boolean(tpm.quote_signature_hex);
+  const binds = Boolean(tee.enclave_signing_key_hex);
+  const pinned = Boolean(body.measurements_are_pinned);
+
+  setFact(0, {
+    badgeText: source, tone: hardware ? 'ok' : 'warn',
+    verdict: hardware
+      ? 'Measurements are read from the platform, not from the node\'s own description of itself.'
+      : 'A software measurement, derived from this node\'s configuration. Anyone with code execution on this host can reproduce it exactly.',
+  });
+  setFact(1, {
+    badgeText: confidential ? evidence.kind : tpmQuote ? 'tpm 2.0' : 'absent',
+    tone: confidential || tpmQuote ? 'ok' : 'warn',
+    verdict: confidential
+      ? 'A confidential-VM platform signed this report. Host memory is not readable by whoever runs the host.'
+      : tpmQuote
+        ? 'A TPM signed a quote over these values. It attests how this machine booted, not that its memory is private.'
+        : 'No platform signed for these measurements. The node is vouching for itself.',
+  });
+  setFact(2, {
+    badgeText: binds ? 'yes' : 'no', tone: binds ? 'ok' : 'warn',
+    verdict: binds
+      ? 'The report declares the key that signs inference responses, so an attested environment and a signed response are the same environment.'
+      : 'The report declares no response-signing key, so nothing connects this attestation to the signatures on inference responses.',
+  });
+  setFact(3, {
+    badgeText: pinned ? 'pinned' : 'nothing pinned', tone: pinned ? 'ok' : 'stop',
+    verdict: pinned
+      ? 'The operator committed expected values in advance, so this report can be checked against something.'
+      : 'Nothing is pinned. A node with no expected values cannot be verified against anything, and says so rather than verifying trivially.',
+  });
+
+  setCopyable($('a-mrenclave'), tee.mrenclave, shorten(tee.mrenclave, 14, 10));
+  setCopyable($('a-key'), tee.enclave_signing_key_hex, shorten(tee.enclave_signing_key_hex, 14, 10));
+  setCopyable($('a-nonce-2'), nonce, nonce);
+  setText($('a-nonce'), `nonce ${shorten(nonce, 8, 6)}`, { flash: false });
+
+  /* The verdict, stated once, in the order that matters: what is missing
+     first, what is established only when nothing is missing. */
+  const verdict = $('a-verdict');
+  let tone, words;
+  if (!pinned) {
+    tone = 'stop';
+    words = 'Nothing is pinned, so this report cannot be verified against anything. Capture the values below into [attestation.expected] and restart.';
+  } else if (!confidential && !tpmQuote) {
+    tone = 'warn';
+    words = 'A software measurement. It attests that Cordon is running the configuration the operator expects, and nothing about the platform underneath it. An attacker with code execution on this host can reproduce it exactly.';
+  } else if (!binds) {
+    tone = 'warn';
+    words = 'The platform signed for these measurements, but the report declares no response-signing key, so nothing connects this attestation to the signatures on inference responses.';
+  } else {
+    tone = 'ok';
+    words = confidential
+      ? 'The platform signed a report committing to your challenge and to the key that signs responses, and this node runs inside a confidential VM, so its memory is not readable by whoever runs the host.'
+      : 'The TPM signed a quote committing to your challenge and to the key that signs responses. Note what a TPM does not give you: it attests how this machine booted, not that its memory is private from whoever owns it.';
+  }
+  verdict.dataset.tone = tone;
+  verdict.innerHTML = svg(tone === 'ok' ? 'check' : tone === 'stop' ? 'cross' : 'alert', 15);
+  verdict.appendChild(el('span', null, words));
+
+  /* The pinnable block, in the shape cordon.toml wants. */
+  const pcrs = tpm.pcr_values?.values ?? {};
+  const lines = [
+    '# Measurements read from the node. Review them before committing.',
+    '[attestation.expected]',
+    `mrenclave   = "${tee.mrenclave ?? ''}"`,
+    `mrsigner    = "${tee.mrsigner ?? ''}"`,
+    'min_isv_svn = 0',
+  ];
+  const indices = Object.keys(pcrs).map(Number).sort((a, b) => a - b);
+  if (indices.length) {
+    lines.push('', '[attestation.expected.pcr_values]');
+    for (const i of indices) lines.push(`${i} = "${pcrs[String(i)]}"`);
+  }
+  pinBlock = lines.join('\n');
+  rawReport = JSON.stringify(report, null, 2);
+  $('a-pin').textContent = pinBlock;
+  $('a-raw').textContent = rawReport;
+  $('a-copy-pin').disabled = false;
+  $('a-copy-raw').disabled = false;
+}
+
+$('a-fetch').addEventListener('click', async () => {
+  const button = $('a-fetch');
+  button.setAttribute('data-busy', '');
+  const nonce = freshNonce();
+  try {
+    const body = await jsonOf(await fetch(`/api/attestation?nonce=${encodeURIComponent(nonce)}`, asConsole));
+    renderAttestation(body, nonce);
+    toast('Report received and bound to your nonce', 'ok');
+  } catch (e) {
+    const verdict = $('a-verdict');
+    verdict.dataset.tone = 'stop';
+    verdict.innerHTML = svg('cross', 15);
+    verdict.appendChild(el('span', null, String(e.message ?? e)));
+    toast('The node refused the challenge', 'stop');
+  } finally {
+    button.removeAttribute('data-busy');
+  }
+});
+
+$('a-copy-pin').addEventListener('click', () => copyAnd(pinBlock, 'Config block copied'));
+$('a-copy-raw').addEventListener('click', () => copyAnd(rawReport, 'Report copied as JSON'));
+
+/* ===========================================================================
+   Audit chain
+   ========================================================================= */
+
+let entries = [];
+let tailSize = 40;
+
+const kindTone = (kind) => ({
+  tamper: 'stop', security_alert: 'stop', admin: 'warn',
+  key_rotation: 'warn', log_export: 'accent', attestation: 'accent',
+}[kind] ?? 'neutral');
+
+async function loadEntries() {
+  const body = $('d-rows');
+  body.textContent = '';
+  const loading = el('tr');
+  const cell = el('td');
+  cell.colSpan = 5;
+  cell.style.padding = '0';
+  const sk = el('div', 'empty');
+  sk.appendChild(el('span', 'empty-title', 'Reading the log…'));
+  cell.appendChild(sk);
+  loading.appendChild(cell);
+  body.appendChild(loading);
+
+  try {
+    const data = await jsonOf(await fetch(`/api/audit/tail?n=${tailSize}`, asConsole));
+    entries = data.entries ?? [];
+    drawEntries();
+    drawActivity();
+  } catch (e) {
+    entries = [];
+    drawEntries(String(e.message ?? e));
+  }
+}
+
+function drawEntries(errorText) {
+  const body = $('d-rows');
+  const q = $('d-search').value.trim().toLowerCase();
+  const kind = $('d-kind').value;
+
+  const shown = entries.filter((e) =>
+    (!kind || e.event_type === kind) &&
+    (!q || `${e.sequence} ${e.event_type} ${e.timestamp} ${e.entry_hash}`.toLowerCase().includes(q)));
+
+  body.textContent = '';
+
+  if (errorText || !shown.length) {
+    const tr = el('tr');
+    const td = el('td');
+    td.colSpan = 5;
+    td.style.padding = '0';
+    const empty = el('div', 'empty');
+    const mark = el('span', 'empty-mark');
+    mark.innerHTML = svg(errorText ? 'alert' : 'info', 16);
+    empty.appendChild(mark);
+    empty.appendChild(el('span', 'empty-title', errorText ? 'The log could not be read' : entries.length ? 'No entry matches that filter' : 'The log is empty'));
+    empty.appendChild(el('span', 'empty-text', errorText
+      ?? (entries.length ? 'Clear the filter to see the rest of the tail.'
+                         : 'Nothing has been written yet. The first request through the pipeline will appear here.')));
+    td.appendChild(empty);
+    tr.appendChild(td);
+    body.appendChild(tr);
+    setText($('d-foot'), errorText ? 'Read failed.' : 'Newest last.', { flash: false });
+    return;
+  }
+
+  for (const e of shown) {
+    const tr = el('tr');
+
+    const discloseCell = el('td');
+    discloseCell.dataset.label = '';
+    const disclose = el('button', 'disclose');
+    disclose.type = 'button';
+    disclose.setAttribute('aria-expanded', 'false');
+    disclose.setAttribute('aria-label', `Show detail for entry ${e.sequence}`);
+    disclose.innerHTML = svg('chev', 12);
+    discloseCell.appendChild(disclose);
+    tr.appendChild(discloseCell);
+
+    const seq = el('td', 'num t-right cell-strong', String(e.sequence));
+    seq.dataset.label = 'Seq';
+    tr.appendChild(seq);
+
+    const kindCell = el('td');
+    kindCell.dataset.label = 'Event';
+    kindCell.appendChild(badge(e.event_type, kindTone(e.event_type)));
+    tr.appendChild(kindCell);
+
+    const time = el('td', 'num', clockOf(e.timestamp));
+    time.dataset.label = 'Time';
+    tr.appendChild(time);
+
+    const hash = el('td', 'num', shorten(e.entry_hash, 12, 8));
+    hash.dataset.label = 'Hash';
+    tr.appendChild(hash);
+
+    body.appendChild(tr);
+
+    /* The full hash and signature are the point of an audit log, and they do
+       not fit on a row at any sane density. They expand. */
+    const detailRow = el('tr', 'row-expand');
+    detailRow.hidden = true;
+    const detailCell = el('td');
+    detailCell.colSpan = 5;
+    const detail = el('div', 'row-detail');
+    const dl = el('dl', 'readout readout--tight');
+    for (const [k, v] of [['Log ID', e.log_id], ['Entry hash', e.entry_hash], ['Signature', e.signature], ['Timestamp', e.timestamp]]) {
+      if (!v) continue;
+      const row = el('div');
+      row.appendChild(el('dt', null, k));
+      const dd = el('dd');
+      setCopyable(dd, String(v), String(v).length > 44 ? shorten(String(v), 24, 16) : String(v));
+      row.appendChild(dd);
+      dl.appendChild(row);
+    }
+    detail.appendChild(dl);
+    detailCell.appendChild(detail);
+    detailRow.appendChild(detailCell);
+    body.appendChild(detailRow);
+
+    disclose.addEventListener('click', () => {
+      const open = disclose.getAttribute('aria-expanded') === 'true';
+      disclose.setAttribute('aria-expanded', String(!open));
+      detailRow.hidden = open;
+    });
+  }
+
+  setText($('d-foot'),
+    `Showing ${shown.length} of ${entries.length} read · newest last · the log records hashes, token counts and policy outcomes, never prompts or completions`,
+    { flash: false });
+}
+
+/* The posture page's activity panel is a view onto entries already read, not
+   a second reader. Nothing here issues a request, so opening the dashboard
+   never writes a log-access record of its own. */
+function drawActivity() {
+  const host = $('o-activity');
+  const recent = entries.slice(-6).reverse();
+  if (!recent.length) return;
+
+  host.textContent = '';
+  const wrap = el('div', 'table-wrap');
+  const table = el('table', 'data responsive');
+  const thead = el('thead');
+  const hr = el('tr');
+  ['Seq', 'Event', 'Timestamp'].forEach((c) => hr.appendChild(el('th', c === 'Seq' ? 't-right' : null, c)));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = el('tbody');
+  for (const e of recent) {
+    const tr = el('tr');
+    const seq = el('td', 'num t-right cell-strong', String(e.sequence));
+    seq.dataset.label = 'Seq';
+    const kind = el('td');
+    kind.dataset.label = 'Event';
+    kind.appendChild(badge(e.event_type, kindTone(e.event_type)));
+    const time = el('td', 'num', clockOf(e.timestamp));
+    time.dataset.label = 'Time';
+    tr.append(seq, kind, time);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  host.appendChild(wrap);
+}
+
+$('d-search').addEventListener('input', () => drawEntries());
+$('d-kind').addEventListener('change', () => drawEntries());
+$('d-refresh').addEventListener('click', () => { auditLoaded = true; loadEntries(); });
+
+$$('.segmented button', $('d-rows').closest('.panel')).forEach((b) => {
+  b.addEventListener('click', () => {
+    $$('.segmented button', b.parentElement).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+    tailSize = Number(b.dataset.n);
+    loadEntries();
+  });
+});
+
+$('d-verify').addEventListener('click', async () => {
+  const button = $('d-verify');
+  button.setAttribute('data-busy', '');
+  setText($('d-verdict-sub'), 'Recomputing every hash and checking every signature…', { flash: false });
+  try {
+    const data = await jsonOf(await fetch('/api/audit/verify', asConsole));
+    setBadge($('d-verdict'), data.valid ? 'intact' : 'broken', data.valid ? 'ok' : 'stop');
+    $('d-verdict-tile').dataset.tone = data.valid ? 'ok' : 'stop';
+    setText($('d-verdict-sub'), data.valid
+      ? `${num(data.entries_verified)} entries verified against ${data.key_provenance === 'cmk_derived'
+          ? 'a key derived from the Client Master Key.'
+          : 'a key this node generated for itself, which proves only that the node agrees with itself.'}`
+      : `The chain does not verify: ${(data.violations ?? []).slice(0, 3).join(' · ')}`,
+      { flash: false });
+    toast(data.valid ? 'Chain verified intact' : 'Chain verification failed', data.valid ? 'ok' : 'stop');
+  } catch (e) {
+    setText($('d-verdict-sub'), String(e.message ?? e), { flash: false });
+    toast('Verification could not run', 'stop');
+  } finally {
+    button.removeAttribute('data-busy');
+  }
+});
+
+let anchorText = null;
+$('d-anchor').addEventListener('click', async () => {
+  const button = $('d-anchor');
+  button.setAttribute('data-busy', '');
+  $('d-anchor-wrap').hidden = false;
+  $('d-anchor-out').textContent = 'Taking an anchor…';
+  try {
+    const data = await jsonOf(await fetch('/api/audit/anchor', asConsole));
+    anchorText = JSON.stringify(data, null, 2);
+    $('d-anchor-out').textContent = anchorText;
+    toast(`Anchor taken at sequence ${data.sequence}`, 'ok');
+  } catch (e) {
+    anchorText = null;
+    $('d-anchor-out').textContent = String(e.message ?? e);
+    toast('Could not take an anchor', 'stop');
+  } finally {
+    button.removeAttribute('data-busy');
+  }
+});
+$('d-anchor-copy').addEventListener('click', () => copyAnd(anchorText, 'Anchor copied'));
+
+/* ===========================================================================
+   Model store
+   ========================================================================= */
+
+async function loadModels() {
+  const host = $('m-table');
+  try {
+    const data = await jsonOf(await fetch('/api/models', asConsole));
+    const bundles = data.bundles ?? [];
+    host.textContent = '';
+    host.appendChild(bundles.length ? bundleTable(bundles, { full: true }) : emptyBundles());
+    setText($('m-count'), String(bundles.length));
+    setText($('m-serving'), data.runtime_model ?? 'none');
+    $('nav-models-tag').textContent = String(bundles.length);
+  } catch (e) {
+    host.textContent = '';
+    const empty = el('div', 'empty');
+    const mark = el('span', 'empty-mark');
+    mark.innerHTML = svg('alert', 16);
+    empty.appendChild(mark);
+    empty.appendChild(el('span', 'empty-title', 'The store could not be read'));
+    empty.appendChild(el('span', 'empty-text', String(e.message ?? e)));
+    host.appendChild(empty);
+  }
+
+}
+
+/* The integrity monitor is node state, not store state: it belongs to the
+   status poll so it stays current whether or not this view is open. */
+function renderIntegrity(d) {
+  const integ = d.integrity;
+  if (!integ) return;
+  const tampered = Boolean(integ.tamper_detected);
+  const passed = integ.last_check_passed;
+  const tone = tampered || passed === false ? 'stop' : passed ? 'ok' : 'neutral';
+  setBadge($('m-integrity'),
+    tampered ? 'tamper detected' : passed === false ? 'failed' : passed ? 'passing' : 'no check yet',
+    tone);
+  $('m-integrity-tile').dataset.tone = tone;
+  setText($('m-integrity-sub'),
+    integ.last_check ? `Last check ${clockOf(integ.last_check)}` : 'No check has run yet',
+    { flash: false });
+}
+
+$('m-refresh').addEventListener('click', () => { loadModels(); toast('Model store refreshed'); });
+
+/* ===========================================================================
+   API reference filter
+   ========================================================================= */
+
+$('api-search').addEventListener('input', (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  let total = 0;
+  $$('[data-api-group]').forEach((group) => {
+    let shown = 0;
+    $$('tr[data-api]', group).forEach((row) => {
+      const hit = !q || row.textContent.toLowerCase().includes(q);
+      row.hidden = !hit;
+      if (hit) shown += 1;
+    });
+    group.hidden = shown === 0;
+    total += shown;
+  });
+  $('api-empty').hidden = total > 0;
+});
+
+/* ===========================================================================
+   Inference console
+
+   A chat surface, but an instrumented one. What matters is not the text: it
+   is what the pipeline did to produce it, which is why every assistant turn
+   carries its receipt and the inspector holds the last one still.
+   ========================================================================= */
+
+const thread     = $('thread');
+const transcript = $('transcript');
+const promptBox  = $('prompt');
+const sendBtn    = $('c-send');
+
+let history = [];
+let sessionId = null;
+let busy = false;
+let turnNo = 0;
+
+function addTurn(role, kind) {
+  $('c-empty')?.remove();
+  turnNo += 1;
+
+  const turn = el('div', `turn turn--${kind ?? role}`);
+  const gutter = el('div', 'turn-gutter');
+  const label = el('span', 'turn-role', role);
+  gutter.appendChild(label);
+  gutter.appendChild(el('span', 'turn-seq', String(turnNo).padStart(3, '0')));
+
+  const body = el('div', 'turn-body');
+  turn.append(gutter, body);
+  thread.appendChild(turn);
+  transcript.scrollTop = transcript.scrollHeight;
+  return { turn, label, body };
+}
+
+function addMeta(turn, chips) {
+  const meta = el('div', 'turn-meta');
+  for (const [text, tone] of chips) meta.appendChild(badge(text, tone));
+  turn.appendChild(meta);
+}
+
+/* The receipt, held still. The transcript scrolls; the evidence should not. */
+function renderInspector(info) {
+  const host = $('inspector-body');
+  host.textContent = '';
+
+  const section = (title, rows) => {
+    const s = el('div', 'inspector-section');
+    s.appendChild(el('span', 'label', title));
+    const dl = el('dl', 'readout readout--tight');
+    for (const [k, v, copyValue] of rows) {
+      const row = el('div');
+      row.appendChild(el('dt', null, k));
+      const dd = el('dd');
+      if (copyValue) setCopyable(dd, copyValue, v);
+      else if (v instanceof Node) dd.appendChild(v);
+      else dd.textContent = v ?? '·';
+      row.appendChild(dd);
+      dl.appendChild(row);
+    }
+    s.appendChild(dl);
+    return s;
+  };
+
+  host.appendChild(section('Usage', [
+    ['Completion', num(info.completionTokens)],
+    ['Prompt', num(info.promptTokens)],
+    ['Finish', info.finish ?? '·'],
+    ['Transport', info.streamed ? 'sse stream' : 'unary'],
+  ]));
+
+  const policyBadge = badge(
+    info.policyTriggered ? 'triggered' : 'clear',
+    info.policyTriggered ? 'warn' : 'ok');
+  host.appendChild(section('Content policy', [
+    ['Outcome', policyBadge],
+    ['Rules matched', info.rules?.length ? info.rules.join(', ') : 'none'],
+  ]));
+
+  host.appendChild(section('Signature', [
+    ['Provenance', badge(info.provenance ?? 'unknown', info.provenance === 'cmk_derived' ? 'ok' : 'warn')],
+    ['Value', shorten(info.signature, 12, 10), info.signature],
+    ['Session', shorten(info.session, 10, 6), info.session],
+  ]));
+
+  const foot = el('div', 'inspector-section');
+  foot.appendChild(el('p', 'prose', info.provenance === 'cmk_derived'
+    ? 'This signature is checkable by any party holding the Client Master Key, without trusting this node.'
+    : 'This node signed with a key it generated for itself. The signature proves only that the node agrees with itself.'));
+  foot.querySelector('.prose').style.fontSize = 'var(--fs-sm)';
+  host.appendChild(foot);
+}
+
+function requestBody() {
+  return {
+    model_id: $('c-model').value.trim() || 'default',
+    messages: history,
+    session_id: sessionId,
+    inference_params: {
+      max_tokens: Math.max(1, parseInt($('c-tokens').value, 10) || 512),
+      temperature: parseFloat($('c-temp').value) || 0,
+    },
+  };
+}
+
+const headers = () => ({
+  'content-type': 'application/json',
+  // Honoured only on a plaintext development listener. Under mTLS the
+  // certificate decides and this header is ignored.
+  'x-client-id': $('c-client').value.trim() || 'console',
+});
+
+async function send() {
+  const text = promptBox.value.trim();
+  if (!text || busy) return;
+
+  busy = true;
+  sendBtn.setAttribute('data-busy', '');
+  promptBox.value = '';
+  promptBox.style.height = 'auto';
+
+  history.push({ role: 'user', content: text });
+  addTurn('you', 'user').body.textContent = text;
+
+  const streaming = $('c-stream').checked;
+  const out = addTurn('cordon', 'assistant');
+  out.body.classList.add('caret');
+
+  try {
+    if (streaming) await streamReply(out);
+    else await unaryReply(out);
+  } catch (e) {
+    out.turn.className = 'turn turn--error';
+    out.label.textContent = 'refused';
+    out.body.textContent = String(e.message ?? e);
+    toast('The pipeline refused the request', 'stop');
+  } finally {
+    out.body.classList.remove('caret');
+    busy = false;
+    sendBtn.removeAttribute('data-busy');
+    promptBox.focus();
+  }
+}
+
+async function unaryReply(out) {
+  const res = await fetch('/api/inference', {
+    method: 'POST', headers: headers(), body: JSON.stringify(requestBody()),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`${data.error ?? res.status}: ${data.message ?? 'request failed'}`);
+
+  const content = data.choices?.[0]?.message?.content ?? '';
+  out.body.textContent = content;
+  history.push({ role: 'assistant', content });
+  sessionId = data.session_id ?? sessionId;
+
+  const policy = data.content_policy ?? {};
+  const finish = data.choices?.[0]?.finish_reason ?? '·';
+
+  addMeta(out.turn, [
+    [`${num(data.usage?.completion_tokens ?? 0)} tokens`, 'neutral'],
+    [`finish ${finish}`, 'neutral'],
+    [policy.triggered ? `policy ${(policy.rules_matched ?? []).join(', ')}` : 'policy clear', policy.triggered ? 'warn' : 'ok'],
+    [`sig ${(data.signature?.value ?? '').slice(0, 10)}…`, data.signature?.key_provenance === 'cmk_derived' ? 'ok' : 'warn'],
+  ]);
+
+  renderInspector({
+    completionTokens: data.usage?.completion_tokens ?? 0,
+    promptTokens: data.usage?.prompt_tokens ?? 0,
+    finish, streamed: false,
+    policyTriggered: Boolean(policy.triggered),
+    rules: policy.rules_matched ?? [],
+    signature: data.signature?.value,
+    provenance: data.signature?.key_provenance,
+    session: sessionId,
+  });
+  setText($('c-session'), sessionId ? `session ${shorten(sessionId, 8, 4)}` : 'no session', { flash: false });
+}
+
+/* SSE over POST needs a manual reader: EventSource cannot send a body. */
+async function streamReply(out) {
+  const res = await fetch('/api/inference/stream', {
+    method: 'POST', headers: headers(), body: JSON.stringify(requestBody()),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(`${data.error ?? res.status}: ${data.message ?? 'request failed'}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '', content = '', done = null, failure = null;
+
+  for (;;) {
+    const { value, done: finished } = await reader.read();
+    if (finished) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let sep;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const record = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+
+      let event = 'message', payload = '';
+      for (const line of record.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) payload += line.slice(5).trim();
+      }
+      if (!payload) continue;
+
+      let parsed;
+      try { parsed = JSON.parse(payload); } catch { continue; }
+
+      if (event === 'delta') {
+        content += parsed.delta ?? '';
+        out.body.textContent = content;
+        transcript.scrollTop = transcript.scrollHeight;
+      } else if (event === 'done') done = parsed;
+      else if (event === 'error') failure = parsed;
+    }
+  }
+
+  if (failure) throw new Error(`${failure.error}: ${failure.message}`);
+
+  history.push({ role: 'assistant', content });
+  sessionId = done?.session_id ?? sessionId;
+
+  if (done) {
+    const policy = done.content_policy ?? {};
+    addMeta(out.turn, [
+      [`${num(done.usage?.completion_tokens ?? 0)} tokens`, 'neutral'],
+      [`finish ${done.finish_reason ?? '·'}`, 'neutral'],
+      [policy.triggered ? 'policy triggered' : 'policy clear', policy.triggered ? 'warn' : 'ok'],
+      [`sig ${(done.signature?.value ?? '').slice(0, 10)}…`, done.signature?.key_provenance === 'cmk_derived' ? 'ok' : 'warn'],
+    ]);
+
+    renderInspector({
+      completionTokens: done.usage?.completion_tokens ?? 0,
+      promptTokens: done.usage?.prompt_tokens ?? 0,
+      finish: done.finish_reason ?? '·', streamed: true,
+      policyTriggered: Boolean(policy.triggered),
+      rules: policy.rules_matched ?? [],
+      signature: done.signature?.value,
+      provenance: done.signature?.key_provenance,
+      session: sessionId,
+    });
+    setText($('c-session'), sessionId ? `session ${shorten(sessionId, 8, 4)}` : 'no session', { flash: false });
+  }
+}
+
+sendBtn.addEventListener('click', send);
+
+promptBox.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+promptBox.addEventListener('input', () => {
+  promptBox.style.height = 'auto';
+  promptBox.style.height = `${Math.min(promptBox.scrollHeight, 200)}px`;
+});
+
+$('c-clear').addEventListener('click', () => {
+  history = [];
+  sessionId = null;
+  turnNo = 0;
+  thread.textContent = '';
+  const empty = el('div', 'empty');
+  empty.id = 'c-empty';
+  empty.appendChild(el('span', 'empty-title', 'Transcript cleared'));
+  empty.appendChild(el('span', 'empty-text',
+    'The audit log is not. Every request sent above is recorded, and clearing a view on this machine does not unrecord it.'));
+  thread.appendChild(empty);
+  setText($('c-session'), 'no session', { flash: false });
+  toast('Transcript cleared; the audit log is unchanged');
+});
+
+/* The inspector folds into a sheet below the transcript on narrow screens. */
+$('c-inspect').addEventListener('click', () => {
+  $('inspector').setAttribute('data-mobile-open', '');
+  $('c-inspect-close').hidden = false;
+});
+$('c-inspect-close').addEventListener('click', () => {
+  $('inspector').removeAttribute('data-mobile-open');
+});
+const narrow = matchMedia('(max-width: 1180px)');
+const syncInspector = () => { $('c-inspect').hidden = !narrow.matches; };
+narrow.addEventListener('change', syncInspector);
+syncInspector();
+
+/* ===========================================================================
+   Boot
+   ========================================================================= */
+
+/* A relative clock on the last successful poll. "12s ago" answers a question
+   a timestamp does not: is this page still talking to the node? */
+setInterval(() => {
+  if (!lastOk) { setText($('f-sync'), 'never synced', { flash: false }); return; }
+  const age = Math.round((Date.now() - lastOk) / 1000);
+  setText($('f-sync'), `synced ${age < 2 ? 'just now' : `${age}s ago`}`, { flash: false });
+  if (age > 20 && failures === 0) setConnection('stale', 'stale');
+}, 1000);
+
+goto(location.hash.slice(1) || 'overview', { push: false });
+refresh();
+})();
+</script>
+</body>
+</html>

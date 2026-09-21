@@ -1,0 +1,102 @@
+# Cordon: Light mode, for the Docker stack.
+#
+# Development and evaluation only. Light mode does not claim a hardware root of
+# trust: measurements are a digest of Cordon's own build and configuration, and
+# client identity comes from the `x-client-id` header, so anyone who can reach
+# the port can claim any client ID. docker-compose publishes the API on
+# 127.0.0.1 for exactly that reason.
+#
+# To make even this meaningful, mount a Client Master Key and set
+# CORDON_CMK_FILE: see the commented lines in docker-compose.yml. Responses and
+# the audit log then verify against a key you derive rather than one the node
+# generated for itself.
+
+mode = "light"
+node_id = "node-dev-001"
+deployment_name = "cordon-dev"
+deployment_id = "deployment-dev-001"
+log_level = "info"
+
+[network]
+bind_address = "0.0.0.0"
+api_port = 8443
+require_mtls = false
+# Light mode is the mode you pull a model in, so Cordon may reach the Hub.
+outbound_policy = "restricted"
+tls_cert_path = "/var/lib/cordon/tls/server.crt"
+tls_key_path = "/var/lib/cordon/tls/server.key"
+
+[tee]
+preferred = "simulation"
+minimum_security_version = 1
+
+[side_channel.timing_normalization]
+enabled = false
+mode = "none"
+bucket_ms = 100
+fixed_floor_ms = 1000
+
+[hsm]
+fips_level = 1
+
+[boot]
+tpm_required = false
+tpm_version = "2.0"
+secure_boot = false
+dm_verity = false
+
+[model_store]
+path = "/var/lib/cordon/bundles"
+integrity_check_interval_minutes = 15
+halt_on_tamper = true
+
+[inference]
+max_concurrent_requests = 32
+default_timeout_seconds = 120
+kv_cache_zero_on_session_end = true
+multi_tenant = true
+max_output_tokens = 4096
+
+[audit]
+log_path = "/var/lib/cordon/audit"
+
+[sustained_attack]
+auth_failure_threshold_per_minute = 10
+global_failure_threshold_per_minute = 50
+covert_channel_score_threshold = 0.7
+replay_probe_threshold = 20
+
+[runtime]
+# The stack ships llama-server. Point model_path at a file you have pulled into
+# the models volume:
+#
+#     docker compose run --rm cordon pull HuggingFaceTB/SmolLM2-360M-Instruct-GGUF \
+#         --model-dir /var/lib/cordon/models
+#
+# then set model_path below and restart.
+backend = "none"
+model_dir = "/var/lib/cordon/models"
+context_size = 4096
+gpu_layers = 0
+parallel_slots = 8
+startup_timeout_seconds = 180
+extra_args = []
+
+[ui]
+# The operator console has no authentication of its own; reachability is its
+# access control. Reach it through an SSH tunnel rather than publishing the port.
+enabled = false
+bind_address = "127.0.0.1"
+port = 8478
+
+[attestation]
+measurement_source = "software_measurement"
+interval_hours = 24
+halt_until_verified = false
+
+[limits]
+max_request_bytes = 1048576
+max_messages = 256
+max_prompt_chars = 262144
+max_connections = 1024
+tls_handshake_timeout_seconds = 15
