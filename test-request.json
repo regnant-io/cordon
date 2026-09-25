@@ -1,0 +1,11 @@
+{
+  "model_id": "smollm2-360m-encrypted",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is 2+2? Test data: email test@example.com, SSN 123-45-6789"
+    }
+  ],
+  "max_tokens": 100,
+  "temperature": 0.7
+}

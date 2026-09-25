@@ -1,0 +1,416 @@
+# Memory Confidentiality vs Boot Attestation: Distinguishing TPM from Confidential VMs
+
+**Title**: Memory Confidentiality vs Boot Attestation: Distinguishing TPM from Confidential VMs  
+**Slug**: memory-confidentiality-vs-boot-attestation  
+**Authors**: Regnant Research  
+**Image URL**: /img/research/confidential-vms.png  
+**Date Label**: 2026 Q3  
+**Abstract**: Industry conflates "hardware attestation" with "confidential computing," but TPM 2.0 and AMD SEV-SNP provide fundamentally different guarantees. TPM proves boot chain integrity; it does not encrypt runtime memory. SEV-SNP encrypts guest memory at the hardware level; the hypervisor sees only ciphertext. For sovereign AI, this distinction determines whether "the operator cannot read your prompts" is architecturally enforced or operationally promised. We clarify the difference, document deployment modes, and implement fail-closed validation refusing configurations claiming guarantees they cannot deliver.  
+**Category**: RESEARCH  
+**Published**: Yes
+
+---
+
+## Abstract
+
+Hardware attestation platforms (TPM, AMD SEV-SNP, Intel TDX, AWS Nitro) are often described collectively as "confidential computing." But they provide distinct guarantees:
+
+**TPM 2.0 attestation** proves how a machine booted: measured boot chain, Secure Boot status, PCR values. It does **not** encrypt runtime memory. An operator with root access can still read prompts and completions from process memory.
+
+**Confidential VMs** (AMD SEV-SNP, Intel TDX, AWS Nitro Enclaves) encrypt guest memory at the hardware level. The hypervisor sees only ciphertext. Even with root on the host, the operator cannot read inference data without breaking hardware encryption.
+
+For sovereign AI deployments, this distinction is critical: it determines whether "the operator cannot read your data" is an **architectural property** (enforced by silicon) or an **operational policy** (enforced by access controls the operator also controls).
+
+We document both approaches, clarify their guarantees, and implement deployment mode validation that refuses configurations claiming memory confidentiality without the hardware to deliver it.
+
+---
+
+## 1. The Confusion
+
+### 1.1 Industry Messaging
+
+Marketing materials often state:
+- "Hardware attestation ensures confidentiality"
+- "TPM-based attestation makes data private"
+- "Run confidential AI workloads with TPM support"
+
+**The problem**: "Attestation" and "confidentiality" are conflated.
+
+### 1.2 What Attestation Actually Proves
+
+Attestation proves **what** is running, not that it's **private**.
+
+A TPM quote proves:
+- These PCR values (hashes of boot components)
+- This firmware version
+- This Secure Boot state
+- At this time (monotonic counter)
+
+It does **not** prove:
+- Memory contents are encrypted
+- The operator cannot read RAM
+- Prompts are private from the host
+
+**Analogy**: A tamper-evident seal on a glass box proves the box hasn't been opened. It doesn't make the contents invisible through the glass.
+
+---
+
+## 2. TPM 2.0 Attestation
+
+### 2.1 What TPM Provides
+
+**Measured Boot**:
+1. CPU loads UEFI firmware
+2. Firmware measures itself into PCR[0]
+3. Firmware loads bootloader, measures it into PCR[4]
+4. Bootloader loads kernel, measures it into PCR[8], PCR[9]
+5. Kernel measures drivers, configs into PCR[10]-PCR[15]
+
+**Attestation Key (AK)**:
+- TPM-resident key, cannot be exported
+- Signs attestation quotes
+- Chains to Endorsement Key (EK), chains to vendor root
+
+**Quote**:
+```c
+struct TPMS_ATTEST {
+    TPM2_GENERATED magic;
+    TPMI_ST_ATTEST type;
+    TPM2B_NAME qualified_signer;
+    TPM2B_DATA extra_data;        // Challenge
+    TPMS_CLOCK_INFO clock_info;
+    uint64_t firmware_version;
+    TPMS_QUOTE_INFO attested;     // PCR digest
+};
+```
+
+Signed by AK. Proves: "This TPM, with this EK, signed a quote over these PCR values."
+
+### 2.2 What TPM Does NOT Provide
+
+**Memory encryption**: PCR values are hashes of code. Code runs in plaintext RAM. The operator (root on the host) can:
+- Attach `gdb` to the process
+- Read `/proc/<pid>/maps` and scan memory
+- Use `ptrace()` to inspect registers
+- Dump core and analyze offline
+
+**Example**:
+```bash
+# On the host (as root)
+pid=$(pgrep cordon)
+sudo gdb -p $pid -batch -ex 'dump memory /tmp/dump.bin 0x7f0000000000 0x7f0010000000'
+strings /tmp/dump.bin | grep "secret prompt"
+```
+
+This works **even with TPM attestation**. The TPM proved how the machine booted; it didn't encrypt memory.
+
+### 2.3 What TPM Is Good For
+
+**Boot integrity**: Prove the OS, kernel, and applications are unmodified.
+
+**Use cases**:
+- Verify the AI inference stack is the version you approved
+- Detect rootkits and firmware tampering
+- Provide audit trail of boot changes
+
+**Not use cases**:
+- "The operator cannot read my prompts"
+- "Memory is confidential"
+
+---
+
+## 3. Confidential VMs
+
+### 3.1 AMD SEV-SNP
+
+**Secure Encrypted Virtualization - Secure Nested Paging**:
+- Guest memory is encrypted with a per-VM key
+- Key is generated by the Platform Security Processor (PSP), not accessible to hypervisor
+- CPU decrypts on access; data in DRAM is always ciphertext
+- DMA and MMIO access from hypervisor sees ciphertext only
+
+**Attestation Report**:
+- Signed by VCEK (Versioned Chip Endorsement Key), chained to AMD root
+- Contains `MEASUREMENT`: hash of guest firmware, kernel, initial pages
+- Contains `REPORT_DATA`: challenge from guest (e.g., our binding challenge)
+
+**Memory confidentiality property**:
+```
+Hypervisor reads guest memory → sees AES-128-GCM ciphertext
+Host root reads /proc/<guest_pid>/mem → sees ciphertext
+DMA from NIC → sees ciphertext
+```
+
+**Only the guest CPU** (in the encrypted VM context) sees plaintext.
+
+### 3.2 Intel TDX
+
+**Trust Domain Extensions**:
+- Similar to SEV-SNP: hardware-encrypted guest memory
+- Key managed by TDX module (firmware), not hypervisor
+- Attestation via TD Quote, signed by Quoting Enclave
+
+**Status in Cordon**: Parser not yet implemented (future work).
+
+### 3.3 AWS Nitro Enclaves
+
+**Nitro Security Module**:
+- Enclave is a VM with no persistent storage, no network (except vsock)
+- Memory is isolated from parent instance
+- Attestation document from `/dev/nsm`, signed by Nitro HSM
+
+**Challenge**: Cordon requires persistent storage (audit log) and network (API). Cannot run in enclave directly.
+
+**Status in Cordon**: Verification implemented; deployment blocked by architectural constraints.
+
+### 3.4 Comparison
+
+| Feature | TPM 2.0 | SEV-SNP | TDX | Nitro |
+|---------|---------|---------|-----|-------|
+| **Boot integrity** | Yes | Yes | Yes | Yes |
+| **Memory encryption** | No | Yes | Yes | Yes |
+| **Hypervisor can read memory** | Yes | No | No | No |
+| **Operator (root) can read memory** | Yes | No | No | No |
+| **Attestation format** | TPM quote | SEV report | TD quote | CBOR/COSE |
+| **Production available** | Widely | EPYC 7003+ | Sapphire Rapids | AWS regions |
+
+---
+
+## 4. Deployment Modes in Cordon
+
+### 4.1 Mode Guarantees
+
+```toml
+# cordon.toml
+
+[deployment]
+mode = "vault"  # Sovereign Cloud | Vault | Island | Dark
+
+[attestation]
+measurement_source = "sev_snp"  # tpm2 | sev_snp | nitro_enclave | software
+```
+
+**Validation** at startup:
+```rust
+match (config.deployment.mode, config.attestation.measurement_source) {
+    (Mode::Dark | Mode::Vault | Mode::Island, MeasurementSource::SoftwareMeasurement) => {
+        return Err("Dark/Vault/Island modes require hardware attestation");
+    }
+    (_, MeasurementSource::SevSnp) if !has_sev_snp() => {
+        return Err("SEV-SNP configured but hardware not detected");
+    }
+    // ... more rules
+}
+```
+
+**Fail-closed**: A configuration claiming memory confidentiality without SEV-SNP/TDX/Nitro is refused.
+
+### 4.2 Documentation
+
+`ARCHITECTURE.md` includes a table:
+
+| Guarantee | TPM 2.0 | SEV-SNP / TDX / Nitro |
+|-----------|---------|----------------------|
+| **Boot integrity** | ✅ Proves boot chain | ✅ Proves boot chain |
+| **Memory confidentiality** | ❌ Operator can read memory | ✅ Hardware-encrypted |
+| **Attestation replay protection** | ✅ Via nonce | ✅ Via nonce |
+| **Measurement binding** | ✅ PCRs in quote | ✅ Measurement in report |
+
+**Operator trust**:
+- TPM: Trust operator's access controls
+- SEV-SNP: Trust AMD PSP; operator sees ciphertext
+
+---
+
+## 5. Real-World Implications
+
+### 5.1 Scenario: Government Classified Data
+
+**Requirement**: "Prompts containing classified information must not be readable by infrastructure operators."
+
+**With TPM**: Operator with root can read memory. Requirement **not met** architecturally. Depends on access controls.
+
+**With SEV-SNP**: Operator with root sees ciphertext. Requirement **met** architecturally (assuming AMD PSP is trusted).
+
+### 5.2 Scenario: Healthcare HIPAA
+
+**Requirement**: "PHI must be encrypted in transit and at rest."
+
+**With TPM**: PHI is plaintext in memory. "At rest" depends on whether memory dumps count. (They do for forensic purposes.)
+
+**With SEV-SNP**: PHI is ciphertext in DRAM. "At rest" includes memory.
+
+### 5.3 Scenario: Central Bank Market Data
+
+**Requirement**: "Financial models and prompts must be confidential from hosting provider."
+
+**With TPM**: Hosting provider (with root) can read memory. Requirement **not met**.
+
+**With SEV-SNP**: Hosting provider sees ciphertext. Requirement **met**.
+
+---
+
+## 6. Implementation in Cordon
+
+### 6.1 Measurement Source Detection
+
+```rust
+pub fn detect_measurement_source() -> MeasurementSource {
+    // Check for SEV-SNP configfs-tsm (Linux 6.7+)
+    if Path::new("/sys/kernel/config/tsm/report").exists() {
+        if fs::read_to_string("/sys/kernel/config/tsm/report/provider")
+            .unwrap_or_default()
+            .contains("sev_snp")
+        {
+            return MeasurementSource::SevSnp;
+        }
+    }
+    
+    // Check for TPM 2.0
+    if Path::new("/dev/tpm0").exists() || Path::new("/dev/tpmrm0").exists() {
+        return MeasurementSource::Tpm2;
+    }
+    
+    // Check for Nitro
+    if Path::new("/dev/nsm").exists() {
+        return MeasurementSource::NitroEnclave;
+    }
+    
+    MeasurementSource::SoftwareMeasurement
+}
+```
+
+### 6.2 Mode Validation
+
+```rust
+impl CordonConfig {
+    pub fn validate(&self) -> Result<()> {
+        let hw_source = matches!(
+            self.attestation.measurement_source,
+            MeasurementSource::Tpm2 
+            | MeasurementSource::SevSnp 
+            | MeasurementSource::NitroEnclave
+        );
+        
+        let memory_confidential = matches!(
+            self.attestation.measurement_source,
+            MeasurementSource::SevSnp
+            | MeasurementSource::TdxQuote
+            | MeasurementSource::NitroEnclave
+        );
+        
+        match self.deployment.mode {
+            Mode::Dark | Mode::Vault | Mode::Island => {
+                if !hw_source {
+                    return Err("Hardware attestation required for this mode");
+                }
+                if !memory_confidential && self.deployment.require_memory_confidentiality {
+                    return Err("This mode requires SEV-SNP/TDX/Nitro for memory confidentiality");
+                }
+            }
+            Mode::SovereignCloud => {
+                if !hw_source {
+                    return Err("Hardware attestation required for Sovereign Cloud");
+                }
+                // Memory confidentiality recommended but not required
+            }
+            Mode::Light => {
+                // Anything goes (development mode)
+            }
+        }
+        
+        Ok(())
+    }
+}
+```
+
+### 6.3 Client Communication
+
+Every attestation response includes:
+```json
+{
+  "measurement_source": "sev_snp",
+  "memory_confidential": true,
+  "operator_can_read_memory": false
+}
+```
+
+Clients can verify the `memory_confidential` field before sending prompts.
+
+---
+
+## 7. Operational Considerations
+
+### 7.1 Deployment Checklist
+
+**For memory confidentiality**, operators must:
+1. ✅ Deploy on SEV-SNP/TDX/Nitro hardware
+2. ✅ Enable confidential VM mode in hypervisor
+3. ✅ Configure `measurement_source = "sev_snp"`
+4. ✅ Pin expected launch measurements
+5. ✅ Verify attestation reports before inference
+
+**For boot integrity only** (TPM):
+1. ✅ Enable Secure Boot
+2. ✅ Configure `measurement_source = "tpm2"`
+3. ✅ Pin expected PCR values
+4. ⚠️ Document that memory is NOT confidential from operator
+
+### 7.2 Cost-Benefit
+
+**SEV-SNP / TDX**:
+- **Cost**: More expensive instances (e.g., AWS c6a/m6a, Azure DCsv3), performance overhead (~5-10%)
+- **Benefit**: Architectural memory confidentiality, no operator trust required
+
+**TPM**:
+- **Cost**: Negligible (most servers have TPM)
+- **Benefit**: Boot integrity, firmware validation
+- **Limitation**: No memory confidentiality
+
+**Recommendation**: Use TPM for Sovereign Cloud mode (client VPC, operator semi-trusted). Use SEV-SNP for Vault/Island/Dark (operator untrusted or adversarial).
+
+---
+
+## 8. Limitations
+
+1. **AMD PSP trust**: SEV-SNP moves trust from operator to AMD. If AMD's PSP firmware is compromised, memory encryption is broken. (Still better than trusting every operator.)
+
+2. **Side channels**: Spectre/Meltdown-style attacks may leak data even from encrypted VMs. Mitigations (retpoline, IBRS) reduce risk but don't eliminate it.
+
+3. **TDX not yet supported**: Parser for TDX quotes is future work.
+
+4. **Nitro deployment blocked**: Verification works; Cordon cannot run in an enclave (no storage, no network).
+
+---
+
+## 9. Related Work
+
+| System | Approach | Memory Confidentiality |
+|--------|----------|----------------------|
+| **Google Confidential VMs** | AMD SEV-ES | Yes (no guest register access) |
+| **Azure Confidential Computing** | SEV-SNP, SGX, TDX | Yes |
+| **AWS Nitro Enclaves** | Nitro HSM | Yes |
+| **Intel SGX** | Enclave model | Yes (but deprecated for data center) |
+| **Arm CCA** | Realm Management Extension | Yes (emerging) |
+
+---
+
+## 10. Conclusion
+
+TPM and confidential VMs serve different purposes:
+- **TPM**: Boot integrity, firmware validation. Memory is **not** confidential.
+- **SEV-SNP/TDX/Nitro**: Boot integrity **and** memory encryption. Operator cannot read prompts.
+
+We clarify this distinction, document it prominently, and implement fail-closed validation refusing configurations claiming memory confidentiality without the hardware to deliver it. Institutions can now choose deployments matching their threat model.
+
+**For sovereign AI**: If "the operator cannot read my data" is a requirement, use SEV-SNP, TDX, or Nitro. TPM alone does not provide this property.
+
+**Implementation**: https://github.com/regnant-io/cordon (`ARCHITECTURE.md` §6, `cordon-core/src/config.rs`)
+
+---
+
+**References**:
+1. AMD SEV-SNP: Strengthening VM Isolation with Integrity Protection and More (AMD, 2020)
+2. Intel Trust Domain Extensions (Intel, 2021)
+3. AWS Nitro Enclaves: Isolated Compute Environments (AWS, 2020)
+4. TPM 2.0 Library Specification (Trusted Computing Group)

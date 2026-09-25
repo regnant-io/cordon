@@ -1,4 +1,4 @@
-mode = "vault"
+mode = "light"
 node_id = "vault-node-01"
 deployment_name = "vault-deployment"
 deployment_id = "vault-deployment-id-12345"
@@ -12,14 +12,15 @@ api_port = 8443
 tls_cert_path = "etc/cordon/tls/server.crt"
 tls_key_path = "etc/cordon/tls/server.key"
 client_ca_path = "etc/cordon/tls/client-ca.crt"
-require_mtls = true
+require_mtls = false  # Disabled for demo
+require_tls = false   # Disabled for demo (Light mode only)
 
 [tee]
 preferred = "amd_sev_snp"
 minimum_security_version = 3
 
 [side_channel.timing_normalization]
-enabled = true
+enabled = false  # Disabled to allow streaming in console
 mode = "bucket"
 bucket_ms = 100
 fixed_floor_ms = 500
@@ -28,7 +29,7 @@ fixed_floor_ms = 500
 fips_level = 3
 
 [boot]
-tpm_required = true
+tpm_required = false  # Disabled since TPM not available
 tpm_version = "2.0"
 secure_boot = false
 dm_verity = false
@@ -56,7 +57,7 @@ replay_probe_threshold = 20
 
 [runtime]
 backend = "supervised"
-model_path = "smollm2-360m"
+model_path = "data/models/huggingfacetb--smollm2-360m-instruct-gguf--q8_0.gguf"
 model_dir = "data/models"
 context_size = 4096
 gpu_layers = 0
@@ -65,14 +66,14 @@ startup_timeout_seconds = 180
 extra_args = []
 
 [ui]
-enabled = false
+enabled = true
 bind_address = "127.0.0.1"
 port = 8478
 
 [attestation]
-measurement_source = "tpm2"
+measurement_source = "software_measurement"  # Using software measurement since TPM not available
 interval_hours = 24
-halt_until_verified = true
+halt_until_verified = false  # Don't halt without TPM
 
 [limits]
 max_request_bytes = 1048576

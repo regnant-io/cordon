@@ -1,9 +1,28 @@
 {
+  "version": "1.0",
+  "client_id": "operator",
   "rules": [
     {
-      "name": "no-pii",
+      "rule_id": "ssn-redact",
+      "description": "Redact Social Security Numbers",
+      "rule_type": {
+        "type": "pattern_filter",
+        "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+        "replacement": "[SSN-REDACTED]"
+      },
       "action": "redact",
-      "pattern": "pii"
+      "enabled": true
+    },
+    {
+      "rule_id": "email-redact",
+      "description": "Redact email addresses",
+      "rule_type": {
+        "type": "pattern_filter",
+        "pattern": "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+        "replacement": "[EMAIL-REDACTED]"
+      },
+      "action": "redact",
+      "enabled": true
     }
   ]
 }
