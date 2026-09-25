@@ -1,0 +1,13 @@
+{
+  "name": "cordon-desktop",
+  "private": true,
+  "description": "Build tooling for the Cordon desktop app. The app itself is Rust (src-tauri) and static HTML (shell).",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "tauri icon icons/source.svg --output src-tauri/icons"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.5"
+  }
+}

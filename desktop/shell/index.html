@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Cordon</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="bar">
+    <span class="brand">
+      <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <path d="M4 22V4H28V28H11V11H21V21" stroke="currentColor" stroke-width="2.4"
+              stroke-linecap="square" stroke-linejoin="miter"></path>
+        <rect class="brand-core" x="13.9" y="13.9" width="4.2" height="4.2"></rect>
+      </svg>
+      Cordon
+    </span>
+    <span class="spacer"></span>
+    <span class="chip" id="status-chip">Starting up</span>
+    <button class="btn btn--sm btn--ghost" id="bar-settings" hidden>Settings</button>
+    <button class="btn btn--sm" id="bar-console" hidden>Open console</button>
+  </header>
+
+  <main class="scroll" id="main">
+
+    <!-- ── First run: choose a model ─────────────────────────────────── -->
+    <section id="view-welcome" hidden>
+      <div class="page">
+        <h1>Choose a model to run</h1>
+        <p class="lede">Cordon runs it on this computer with llama.cpp. The download is the only
+          time anything leaves the machine.</p>
+
+        <div class="section">
+          <div class="list" id="catalog"></div>
+          <p class="faint" id="hardware-line" hidden></p>
+        </div>
+
+        <div class="other">
+          <div class="card">
+            <h2>Use a file you already have</h2>
+            <p>Any GGUF model on disk. Cordon serves it where it is and never modifies it.</p>
+            <div class="actions"><button class="btn" id="import">Open GGUF file…</button></div>
+          </div>
+          <div class="card">
+            <h2>Download from Hugging Face</h2>
+            <p>A repository that publishes a single-file GGUF. Add <span class="mono">:Q4_K_M</span>
+              to pick a quantisation.</p>
+            <div class="field-row">
+              <input class="input mono" id="repo" placeholder="owner/repo" spellcheck="false" autocomplete="off">
+              <button class="btn" id="repo-go">Download</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Starting ───────────────────────────────────────────────────── -->
+    <section id="view-starting" class="center" hidden>
+      <div class="boot">
+        <h1 id="boot-title">Starting Cordon</h1>
+        <p class="boot-model" id="boot-model"></p>
+        <div class="progress progress--busy"><div class="progress-fill"></div></div>
+        <div class="boot-step"><span id="boot-step">Preparing</span><span class="mono" id="boot-elapsed">0s</span></div>
+        <pre class="log" id="boot-log" hidden></pre>
+        <div class="actions section-gap">
+          <button class="btn btn--ghost btn--sm" id="boot-details" aria-expanded="false">Show details</button>
+          <span class="spacer"></span>
+          <button class="btn btn--sm" id="boot-cancel">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Stopped or failed ─────────────────────────────────────────── -->
+    <section id="view-stopped" class="center" hidden>
+      <div class="boot">
+        <h1 id="stopped-title">Cordon is stopped</h1>
+        <p class="boot-model" id="stopped-model"></p>
+        <div class="error" id="stopped-error" hidden></div>
+        <pre class="log log--tall" id="stopped-log" hidden></pre>
+        <div class="actions section">
+          <button class="btn btn--primary" id="stopped-start">Start</button>
+          <button class="btn" id="stopped-settings">Settings</button>
+          <span class="spacer"></span>
+          <button class="btn btn--ghost btn--sm" id="stopped-logs">Show log file</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Settings ───────────────────────────────────────────────────── -->
+    <section id="view-settings" hidden>
+      <div class="page">
+        <h1>Settings</h1>
+        <p class="lede" id="settings-lede">Changes to the model or performance restart the runtime.</p>
+
+        <div class="section">
+          <div class="section-head"><h2>Model</h2><p id="models-count"></p></div>
+          <div class="list" id="models"></div>
+          <div class="actions section-gap" id="model-actions">
+            <button class="btn btn--sm" id="settings-import">Open GGUF file…</button>
+            <button class="btn btn--sm btn--ghost" id="settings-catalog">Download another model…</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>Performance</h2></div>
+          <div class="form">
+            <div class="row">
+              <div><div class="row-label">GPU offload</div>
+                <div class="row-help">Auto places as many layers on the GPU as its free memory allows.</div></div>
+              <div class="row-control">
+                <div class="segmented" role="group" aria-label="GPU offload" id="gpu-mode">
+                  <button data-mode="auto">Auto</button>
+                  <button data-mode="all">All layers</button>
+                  <button data-mode="cpu">CPU only</button>
+                  <button data-mode="custom">Custom</button>
+                </div>
+                <div class="field-row" id="gpu-custom" hidden>
+                  <input class="input input--num mono" id="gpu-layers" type="number" min="1" max="999">
+                  <span class="faint">layers</span>
+                </div>
+                <div class="faint" id="devices"></div>
+              </div>
+            </div>
+            <div class="row">
+              <div><div class="row-label">Context length</div>
+                <div class="row-help">Tokens shared by all requests in flight. Longer contexts use more memory.</div></div>
+              <div class="row-control">
+                <select class="input input--select" id="ctx">
+                  <option value="2048">2,048 tokens</option>
+                  <option value="4096">4,096 tokens</option>
+                  <option value="8192">8,192 tokens</option>
+                  <option value="16384">16,384 tokens</option>
+                  <option value="32768">32,768 tokens</option>
+                  <option value="65536">65,536 tokens</option>
+                  <option value="131072">131,072 tokens</option>
+                </select>
+              </div>
+            </div>
+            <div class="row">
+              <div><div class="row-label">Parallel requests</div>
+                <div class="row-help">How many requests are generated at once. More requests share the same context.</div></div>
+              <div class="row-control"><input class="input input--num mono" id="parallel" type="number" min="1" max="32"></div>
+            </div>
+            <div class="row">
+              <div><div class="row-label">CPU threads</div>
+                <div class="row-help">Leave on automatic unless generation competes with other work.</div></div>
+              <div class="row-control">
+                <label class="switch"><input type="checkbox" id="threads-auto"><span class="switch-track"></span><span>Automatic</span></label>
+                <div class="field-row" id="threads-custom" hidden>
+                  <input class="input input--num mono" id="threads" type="number" min="1" max="256">
+                  <span class="faint" id="threads-hint"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>Access</h2></div>
+          <div class="form">
+            <div class="row">
+              <div><div class="row-label">API port</div>
+                <div class="row-help">Plain HTTP on 127.0.0.1 only. Clients identify themselves with the <span class="mono">x-client-id</span> header.</div></div>
+              <div class="row-control">
+                <input class="input input--num mono" id="api-port" type="number" min="1" max="65535">
+                <div class="faint" id="api-url"></div>
+              </div>
+            </div>
+            <div class="row">
+              <div><div class="row-label">Console port</div>
+                <div class="row-help">The operator console. Also reachable from a browser on this computer.</div></div>
+              <div class="row-control">
+                <input class="input input--num mono" id="console-port" type="number" min="1" max="65535">
+                <div class="faint" id="console-url"></div>
+              </div>
+            </div>
+            <div class="row">
+              <div><div class="row-label">Start on launch</div>
+                <div class="row-help">Load the selected model when Cordon opens.</div></div>
+              <div class="row-control">
+                <label class="switch"><input type="checkbox" id="autostart"><span class="switch-track"></span><span>Enabled</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>About</h2></div>
+          <div class="form"><div class="row"><div class="row-label">This installation</div>
+            <div class="row-control">
+              <dl class="facts" id="about"></dl>
+              <div class="actions">
+                <button class="btn btn--sm" id="show-data">Show data folder</button>
+                <button class="btn btn--sm" id="show-logs">Show log file</button>
+              </div>
+            </div></div></div>
+        </div>
+
+        <div class="savebar">
+          <span class="note" id="save-note">No unsaved changes</span>
+          <button class="btn btn--ghost" id="discard" disabled>Discard</button>
+          <button class="btn btn--primary" id="save" disabled>Save</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Catalog from settings ──────────────────────────────────────── -->
+    <section id="view-catalog" hidden>
+      <div class="page">
+        <div class="actions"><button class="btn btn--sm btn--ghost" id="catalog-back">‹ Settings</button></div>
+        <h1 class="section-gap">Download a model</h1>
+        <p class="lede">Downloads resume if interrupted, and are checked against the digest the publisher released.</p>
+        <div class="section"><div class="list" id="catalog-2"></div></div>
+      </div>
+    </section>
+
+    <!-- Shown only when the page is opened outside the app. -->
+    <section id="view-outside" class="center" hidden>
+      <div class="boot"><h1>This page runs inside the Cordon app</h1>
+        <p class="lede">Open the Cordon application to use it.</p></div>
+    </section>
+
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

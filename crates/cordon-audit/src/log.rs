@@ -94,8 +94,13 @@ struct LogState {
     bytes_written: u64,
 }
 
-/// Name of the file that marks a log directory as having a live writer.
+/// Name of the file a live writer holds an operating-system lock on.
 const WRITER_LOCK: &str = ".cordon-writer.lock";
+
+/// Who holds the claim, for the refusal message. Informational only: the lock
+/// on [`WRITER_LOCK`] is the claim, and this file may describe a writer that
+/// has since exited.
+const WRITER_INFO: &str = ".cordon-writer.info";
 
 /// An exclusive claim on a log directory, released when the log is dropped.
 ///
@@ -112,64 +117,72 @@ const WRITER_LOCK: &str = ".cordon-writer.lock";
 /// A tamper-evident log that cries tamper over an operational slip is worse
 /// than useless: it trains people to disbelieve it. So the second writer is
 /// refused instead.
+/// # Why it is an operating-system lock
+///
+/// The claim is an advisory lock held on an open file, not the existence of
+/// a file. The operating system releases it when the handle closes, which
+/// includes the process being killed or crashing, so a node that did not shut
+/// down cleanly leaves nothing behind that a person has to find and delete
+/// before the next start. Two live writers are still refused.
 struct WriterLock {
-    path: PathBuf,
+    /// Holding the handle is holding the lock.
+    _file: File,
 }
 
 impl WriterLock {
     /// Claim `log_dir`, or explain who already has it.
     fn acquire(log_dir: &Path, node_id: &str) -> AuditResult<Self> {
         let path = log_dir.join(WRITER_LOCK);
+        let info_path = log_dir.join(WRITER_INFO);
 
         let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
+        options.create(true).truncate(false).read(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
 
-        match options.open(&path) {
-            Ok(mut file) => {
-                let _ = writeln!(file, "node_id={}", node_id);
-                let _ = writeln!(file, "pid={}", std::process::id());
-                let _ = writeln!(file, "since={}", Utc::now().to_rfc3339());
-                let _ = file.sync_all();
-                Ok(Self { path })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let holder = std::fs::read_to_string(&path).unwrap_or_default();
-                Err(AuditError::AlreadyLocked(format!(
-                    "another Cordon node is already writing to the audit log at {}.\n\n{}\n\
-                     Two writers fork the hash chain: both continue from the same \
-                     sequence, and the log then fails verification as though it had been \
-                     tampered with. Point this node at its own audit directory.\n\n\
-                     If no node is running, the previous one did not shut down cleanly. \
-                     Verify the chain with cordon-verify-log, then remove {} to release \
-                     the claim.",
-                    log_dir.display(),
-                    holder.trim(),
-                    path.display()
-                )))
-            }
-            Err(e) => Err(AuditError::IoError(format!(
+        let file = options.open(&path).map_err(|e| {
+            AuditError::IoError(format!(
                 "cannot claim the audit log at {}: {}",
                 log_dir.display(),
                 e
-            ))),
-        }
-    }
-}
+            ))
+        })?;
 
-impl Drop for WriterLock {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.path) {
-            tracing::warn!(
-                path = %self.path.display(),
-                "could not release the audit log claim: {}. Remove the file before \
-                 starting another node against this directory.",
+        match file.try_lock() {
+            Ok(()) => {
+                let info = format!(
+                    "node_id={}
+pid={}
+since={}
+",
+                    node_id,
+                    std::process::id(),
+                    Utc::now().to_rfc3339()
+                );
+                if let Err(e) = std::fs::write(&info_path, info) {
+                    tracing::debug!("cannot record the audit log claim holder: {}", e);
+                }
+                Ok(Self { _file: file })
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let holder = std::fs::read_to_string(&info_path).unwrap_or_default();
+                Err(AuditError::AlreadyLocked(format!(
+                    "another Cordon node is already writing to the audit log at {}.
+
+{}
+                     Two writers fork the hash chain: both continue from the same                      sequence, and the log then fails verification as though it had been                      tampered with. Stop the other node, or point this one at its own                      audit directory.",
+                    log_dir.display(),
+                    holder.trim()
+                )))
+            }
+            Err(std::fs::TryLockError::Error(e)) => Err(AuditError::IoError(format!(
+                "cannot lock the audit log at {}: {}",
+                log_dir.display(),
                 e
-            );
+            ))),
         }
     }
 }

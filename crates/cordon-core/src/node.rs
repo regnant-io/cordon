@@ -77,6 +77,11 @@ pub enum KeyProvenance {
     /// Generated at boot because no CMK was provisioned. The node self-certifies,
     /// so its signatures carry no cross-party guarantee. Development only.
     Ephemeral,
+    /// Derived from a seed kept on this machine (`local_key_path`), because no
+    /// CMK was provisioned. Stable across restarts, so the audit chain verifies
+    /// end to end, but, like [`Ephemeral`](Self::Ephemeral), only this machine
+    /// vouches for the signatures. Light mode only.
+    Local,
 }
 
 impl KeyProvenance {
@@ -85,6 +90,7 @@ impl KeyProvenance {
         match self {
             KeyProvenance::CmkDerived => "cmk_derived",
             KeyProvenance::Ephemeral => "ephemeral",
+            KeyProvenance::Local => "local",
         }
     }
 }
@@ -191,6 +197,11 @@ pub struct CordonNode {
     staged_model: Option<StagedModel>,
     /// Process start time.
     pub started_at: Instant,
+    /// Cancelled when the node shuts down. Every background task watches it,
+    /// so a stopped node stops working rather than carrying on in the
+    /// background, and in particular does not restart a runtime that was
+    /// stopped on purpose.
+    stopping: tokio_util::sync::CancellationToken,
 }
 
 /// The outcome of a completed inference request.
@@ -406,6 +417,7 @@ impl CordonNode {
             supervisor: built.supervisor,
             staged_model,
             started_at: Instant::now(),
+            stopping: tokio_util::sync::CancellationToken::new(),
         })
     }
 
@@ -531,6 +543,38 @@ impl CordonNode {
                     )));
                 }
 
+                if let Some(path) = &config.local_key_path {
+                    // The seed feeds the same derivation a CMK would, with its
+                    // own domain, but it is not treated as one: no bundle keys,
+                    // no admin key, and the provenance says where it came from.
+                    let seed = load_or_create_local_seed(path)?;
+                    let local = MasterKey::from_bytes(seed);
+                    let log_key = local
+                        .derive_log_signing_key(&config.deployment_id, "cordon-local-key")
+                        .map_err(|e| CordonError::KeyError(e.to_string()))?;
+                    let enclave_key = local
+                        .derive_enclave_key(&config.deployment_id, "cordon-local-key")
+                        .map_err(|e| CordonError::KeyError(e.to_string()))?;
+                    tracing::info!(
+                        path = %path.display(),
+                        "Signing keys derived from this machine's local key; the audit \
+                         chain verifies across restarts, and signatures carry this \
+                         machine's word only"
+                    );
+                    return Ok((
+                        log_key,
+                        NodeKeys {
+                            master: None,
+                            key_principal,
+                            admin_vk: None,
+                            enclave_key,
+                            provenance: KeyProvenance::Local,
+                            insecure_admin,
+                            allow_unregistered_models,
+                        },
+                    ));
+                }
+
                 tracing::warn!(
                     "No Client Master Key provisioned; signing keys are ephemeral and \
                      self-certified. Audit and response signatures carry no cross-party \
@@ -612,16 +656,28 @@ impl CordonNode {
     }
 
     /// Start the background tasks that keep node state fresh.
+    ///
+    /// Each task holds only a weak reference to the node and exits when the
+    /// node begins [shutting down](Self::shutdown), so a node that has been
+    /// stopped can be dropped, and its audit log, runtime and staged weights
+    /// released, without the process exiting.
     pub fn start_background_services(self: &Arc<Self>) {
-        self.integrity_monitor.clone().start();
+        self.integrity_monitor
+            .clone()
+            .start(self.stopping.child_token());
 
         // Metrics refresh.
         {
-            let node = self.clone();
+            let node = Arc::downgrade(self);
+            let stopping = self.stopping.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(15));
                 loop {
-                    ticker.tick().await;
+                    tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        _ = ticker.tick() => {}
+                    }
+                    let Some(node) = node.upgrade() else { break };
                     let active = matches!(
                         node.state.read().enclave_state,
                         crate::state::EnclaveState::Active
@@ -637,11 +693,16 @@ impl CordonNode {
         // Periodic reclamation: idle sessions are zeroized, lapsed suspensions
         // and rate-limit buckets are dropped, stale attestations expire.
         {
-            let node = self.clone();
+            let node = Arc::downgrade(self);
+            let stopping = self.stopping.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(60));
                 loop {
-                    ticker.tick().await;
+                    tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        _ = ticker.tick() => {}
+                    }
+                    let Some(node) = node.upgrade() else { break };
                     let expired = node.inference.kv_cache().cleanup_expired(900);
                     if expired > 0 {
                         tracing::debug!(expired, "Idle sessions reclaimed and zeroized");
@@ -656,21 +717,36 @@ impl CordonNode {
 
         // Runtime supervision: restart the child if it dies underneath us.
         if let Some(supervisor) = &self.supervisor {
-            let supervisor = supervisor.clone();
+            let supervisor = Arc::downgrade(supervisor);
             let state = self.state.clone();
+            let stopping = self.stopping.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(10));
                 loop {
-                    ticker.tick().await;
+                    tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        _ = ticker.tick() => {}
+                    }
+                    let Some(supervisor) = supervisor.upgrade() else {
+                        break;
+                    };
                     if supervisor.is_running() {
                         continue;
                     }
                     tracing::error!("Model runtime exited unexpectedly; restarting");
                     state.write().degrade("model runtime restarting");
-                    match supervisor.restart().await {
+                    let restarted = tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        result = supervisor.restart() => result,
+                    };
+                    match restarted {
                         Ok(()) => {
                             tracing::info!("Model runtime restarted");
-                            state.write().go_operational();
+                            // Only the degradation this task caused is lifted.
+                            // A node quarantined while the runtime was down
+                            // stays quarantined: a runtime coming back is not
+                            // an operator recovering the node.
+                            state.write().recover_from_degraded();
                         }
                         Err(e) => {
                             tracing::error!("Model runtime restart failed: {}", e);
@@ -702,7 +778,16 @@ impl CordonNode {
 
     /// Stop the model runtime and erase any staged plaintext.
     pub async fn shutdown(&self) {
+        // Once only: the server shuts the node down on its way out, and a
+        // caller that owns the node may too. A second pass would record a
+        // second shutdown in the audit log that did not happen.
+        if self.stopping.is_cancelled() {
+            return;
+        }
         tracing::info!("Shutting down");
+        // Background tasks first, so none of them restarts the runtime this is
+        // about to stop.
+        self.stopping.cancel();
         if let Err(e) = self.inference.shutdown().await {
             tracing::warn!("Runtime shutdown reported: {}", e);
         }
@@ -715,6 +800,12 @@ impl CordonNode {
             tee_type: self.config.tee.preferred.to_string(),
             node_id: self.config.node_id.clone(),
         }));
+    }
+
+    /// A token that is cancelled when the node begins shutting down, for
+    /// callers that run their own work against the node.
+    pub fn stopping(&self) -> tokio_util::sync::CancellationToken {
+        self.stopping.clone()
     }
 
     // ── Keys and authorization ──────────────────────────────────────────────
@@ -1632,6 +1723,63 @@ fn env_flag(name: &str) -> bool {
 /// dump, or a child process can all expose. `CORDON_CMK` is accepted for
 /// development and warns loudly. Production should source the key from an HSM
 /// over PKCS#11, which plugs in here.
+/// Read the local signing seed at `path`, creating it on first use.
+///
+/// The file holds 64 hex characters and is readable only by the account
+/// running Cordon. A file that exists but does not hold a seed is an error
+/// rather than something to overwrite: replacing it would silently change the
+/// key every earlier audit entry was signed with.
+fn load_or_create_local_seed(path: &std::path::Path) -> CordonResult<[u8; 32]> {
+    use rand::RngCore;
+    use std::io::Write as _;
+
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let bytes = hex::decode(text.trim()).map_err(|_| {
+                CordonError::KeyError(format!("{} does not hold a hex key seed", path.display()))
+            })?;
+            return bytes.try_into().map_err(|_| {
+                CordonError::KeyError(format!(
+                    "{} does not hold a 32-byte key seed",
+                    path.display()
+                ))
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CordonError::KeyError(format!(
+                "cannot read {}: {}",
+                path.display(),
+                e
+            )))
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CordonError::KeyError(format!("cannot create {}: {}", parent.display(), e))
+        })?;
+    }
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| CordonError::KeyError(format!("cannot create {}: {}", path.display(), e)))?;
+    file.write_all(hex::encode(seed).as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| CordonError::KeyError(format!("cannot write {}: {}", path.display(), e)))?;
+    tracing::info!(path = %path.display(), "Created this machine's local signing key");
+    Ok(seed)
+}
+
 fn load_cmk_hex() -> Option<String> {
     if let Ok(path) = std::env::var("CORDON_CMK_FILE") {
         return match std::fs::read_to_string(&path) {

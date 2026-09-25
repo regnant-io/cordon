@@ -67,13 +67,19 @@ impl ChainHealth {
         *self.inner.write() = Some((valid, Utc::now()));
     }
 
-    /// Re-verify the chain on a timer, off the request path.
+    /// Re-verify the chain on a timer, off the request path, until the node
+    /// shuts down.
     pub fn spawn_refresher(self: Arc<Self>, node: Arc<CordonNode>, every: Duration) {
+        let stopping = node.stopping();
+        let node = Arc::downgrade(&node);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(every);
             loop {
-                ticker.tick().await;
-                let node = node.clone();
+                tokio::select! {
+                    _ = stopping.cancelled() => break,
+                    _ = ticker.tick() => {}
+                }
+                let Some(node) = node.upgrade() else { break };
                 let verdict = tokio::task::spawn_blocking(move || node.audit_chain_valid()).await;
                 match verdict {
                     Ok(valid) => {

@@ -26,6 +26,7 @@ cordon run smollm2-360m-instruct-gguf
 - [What is real, and what is not](#what-is-real-and-what-is-not)
 - [Where the trust lives](#where-the-trust-lives)
 - [Install](#install)
+  - [Desktop app](#desktop-app)
 - [Getting a model](#getting-a-model)
 - [Deployment modes](#deployment-modes)
   - [Light, development](#light--development)
@@ -273,6 +274,44 @@ one machine. That is occasionally what you want and usually not.
 ---
 
 ## Install
+
+### Desktop app
+
+For Windows, macOS and Linux. The installer includes llama.cpp (build
+`b11026`, with Vulkan GPU support on Windows and Linux and Metal on macOS), so
+there is nothing else to set up.
+
+1. Download the installer for your platform from the
+   [releases page](https://github.com/regnant-io/cordon/releases): `.exe` for
+   Windows, `.dmg` for macOS, `.deb`, `.rpm` or `.AppImage` for Linux. The
+   Windows installer does not need administrator rights.
+2. Open Cordon and choose a model. The first screen offers a short list of
+   small instruction-tuned models, or opens a GGUF file you already have.
+3. The model loads, and the window becomes the operator console described in
+   [The operator console](#the-operator-console).
+
+The desktop app is `cordon run` without a terminal. It runs a Light-mode node
+in the app's own process, supervises llama.cpp on loopback, and serves the same
+API and console:
+
+| | |
+|---|---|
+| API | `http://127.0.0.1:8477`, plain HTTP, loopback only, identity from `x-client-id` |
+| Console | `http://127.0.0.1:8478`, also reachable from a browser on the same machine |
+| Data | `%LOCALAPPDATA%\dev.cordon.desktop` (Windows), `~/Library/Application Support/dev.cordon.desktop` (macOS), `~/.local/share/dev.cordon.desktop` (Linux) |
+
+If a port is taken, another is chosen and shown in **Settings**
+(`Ctrl+,`), which also sets the model, GPU offload, context length, parallel
+requests and threads. Changing them restarts the runtime; requests in flight
+finish first.
+
+What the desktop app does not change: it is Light mode. Signing keys are kept
+in the data directory (`node.key`), so the audit chain verifies across
+restarts, but the console will tell you, correctly, that those signatures are
+this machine's word only. For a deployment someone else has to trust, use
+`cordon serve` with a Client Master Key.
+
+Building it yourself is described in [desktop/README.md](desktop/README.md).
 
 ### From source
 
@@ -778,12 +817,12 @@ having and is not that.
 
 ## The operator console
 
-A single page, six views: node posture, an attestation challenger, the audit
-chain, an inference console that exercises the real pipeline, the model store,
-and an endpoint reference. `Ctrl-K` opens a command palette that reaches every
-view and every action without a mouse.
+A single page, six views: an overview, attestation, the audit log, an
+inference console that exercises the real pipeline, the model store, and an API
+reference. `Ctrl-K` opens a command palette that reaches every view and every
+action without a mouse. The desktop app loads the same page.
 
-Posture leads with an **assurance ledger**: four claims an operator might make
+The overview leads with four **security claims** an operator might make
 to an auditor, that signatures verify against a key the operator cannot forge,
 that measurements come from hardware, that expected measurements are pinned, and
 that the audit chain verifies end to end, each carrying its own verdict and the
@@ -829,10 +868,15 @@ Sections worth knowing:
 backend = "supervised"          # supervised | external | none
 binary = "/opt/llama.cpp/llama-server"
 model_path = "/var/lib/cordon/models/model.gguf"   # or a registered bundle ID
-context_size = 8192
-gpu_layers = 35
+context_size = 8192             # shared by all slots when llama.cpp supports --kv-unified
+gpu_layers = "auto"             # a count, "auto" (fit free VRAM) or "all"; 0 is CPU only
 parallel_slots = 8              # raised to max_concurrent_requests if lower
 startup_timeout_seconds = 180
+
+# Light mode only, and ignored when a Client Master Key is provisioned: a
+# signing-key seed kept on disk, so the audit chain verifies across restarts.
+# `cordon run` sets it to <data-dir>/node.key.
+local_key_path = "/var/lib/cordon/node.key"
 
 [attestation]
 # sev_snp | tpm2 | software_measurement (Light only) | nitro_enclave (verify only)
@@ -968,10 +1012,17 @@ the values, and restart.
 
 **`another Cordon node is already writing to the audit log`**, two nodes
 pointed at one audit directory fork the hash chain, and the log then fails
-verification as though it had been tampered with, so the second is refused. Give
-this node its own directory. If none is running, the previous one did not shut
-down cleanly: verify the chain with `cordon-verify-log`, then delete
-`.cordon-writer.lock`.
+verification as though it had been tampered with, so the second is refused. Stop
+the other node, or give this one its own directory. The claim is an
+operating-system lock, released when its holder exits by any route, so a node
+that crashed or was killed does not leave anything to clean up.
+
+**The audit chain shows as broken after a restart, with no tampering**; the
+log was written by a node with no Client Master Key and no `local_key_path`, so
+each boot signed with fresh keys and earlier entries no longer verify against
+the current one. `cordon run` and the desktop app now keep a local key; a data
+directory written before that keeps its old entries, and starting a new one
+gives a chain that verifies from its first entry.
 
 **`streaming is refused while side_channel.timing_normalization is enabled`**;
 correct. Use `POST /v1/inference`, which is normalised.

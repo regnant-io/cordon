@@ -37,6 +37,12 @@ async-trait = { workspace = true }
 x509-parser = { workspace = true }
 tokio-stream = { workspace = true }
 url = { workspace = true }
+tokio-util = { workspace = true }
+
+# The supervised runtime is placed in a job object on Windows so that it cannot
+# outlive Cordon, however Cordon exits.
+[target.'cfg(windows)'.dependencies]
+win32job = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Cordon",
+  "mainBinaryName": "Cordon",
+  "identifier": "dev.cordon.desktop",
+  "build": {
+    "frontendDist": "../shell"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "The Cordon Authors",
+    "copyright": "Copyright The Cordon Authors. Licensed under Apache-2.0.",
+    "category": "DeveloperTool",
+    "shortDescription": "A confidential inference control plane with a local model runtime",
+    "longDescription": "Cordon runs a local language model behind identity, policy, output filtering, a tamper-evident audit log and signed responses. The desktop app ships llama.cpp, downloads a model, and opens the operator console.",
+    "homepage": "https://github.com/regnant-io/cordon",
+    "license": "Apache-2.0",
+    "licenseFile": "../../LICENSE",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "llama/": "llama/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "startMenuFolder": "Cordon"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libvulkan1"]
+      },
+      "rpm": {
+        "depends": ["vulkan-loader"]
+      }
+    }
+  }
+}

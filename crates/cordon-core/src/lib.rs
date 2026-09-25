@@ -29,8 +29,8 @@ pub mod timing;
 pub mod tpm;
 
 pub use config::{
-    AuditConfig, CordonConfig, DeploymentMode, MeasurementSource, NetworkConfig, RuntimeBackend,
-    TeeConfig,
+    AuditConfig, CordonConfig, DeploymentMode, GpuLayers, MeasurementSource, NetworkConfig,
+    RuntimeBackend, TeeConfig,
 };
 pub use error::{CordonError, CordonResult};
 pub use node::{CordonNode, KeyProvenance};

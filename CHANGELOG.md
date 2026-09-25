@@ -11,6 +11,62 @@ documentation described and what the code did. Some of that distance was a
 missing feature; some of it was a defence that reported success without
 performing the work its name described.
 
+### A desktop app for Windows, macOS and Linux
+
+`desktop/` is Cordon as an installable application: a Light-mode node run
+in-process, llama.cpp `b11026` bundled (Vulkan on Windows and Linux, Metal on
+macOS), and the operator console as its main window. A first-run screen offers
+five small instruction-tuned models, a Hugging Face repository field, and
+"open a GGUF file". Settings cover the model, GPU offload, context length,
+parallel requests, threads and ports, and restart the runtime when they change.
+The API stays on `127.0.0.1:8477`, so scripts that talk to `cordon run` talk to
+the desktop app unchanged. `.github/workflows/desktop.yml` builds NSIS/MSI,
+DMG, and deb/rpm/AppImage installers. See [desktop/README.md](desktop/README.md).
+
+### Fixed
+
+- **Requests beyond ~128 tokens could fail on a healthy node.** Cordon started
+  llama.cpp with `--parallel` raised to `max_concurrent_requests` (32 by
+  default) and a 4096-token context, and llama.cpp divides the context between
+  slots unless told otherwise. It is now started with `--kv-unified` when the
+  build accepts it, so every request can use the whole window.
+- **A runtime restart could lift a quarantine.** The supervisor that restarts a
+  crashed llama.cpp set the node healthy afterwards, whatever state it was in.
+  It now clears only the degradation it caused.
+- **A crashed or killed node blocked the next start** until someone deleted
+  `.cordon-writer.lock` by hand. The writer claim is now an operating-system
+  file lock, released when its holder exits by any route. Two live writers are
+  still refused.
+- **The audit chain read as broken after every restart of `cordon run`.** With
+  no Client Master Key, each boot signed with fresh keys. `local_key_path`
+  (Light mode only) keeps a seed on disk; `cordon run` and the desktop app set
+  it. The console reports these keys as `local`, not as CMK-derived.
+- **Stopping a node did not stop its background tasks**, and the supervision
+  loop could restart a runtime that had just been shut down on purpose. Tasks
+  now exit on shutdown and hold the node weakly; `shutdown` is idempotent, so
+  the audit log records one shutdown.
+- **The console listener was aborted, not drained**, on shutdown, and a port
+  collision on it was a log line after the node had announced itself. It now
+  shuts down gracefully with the API, and a taken port fails startup.
+- On Windows, llama.cpp is started without a console window and inside a job
+  object that terminates it with Cordon, so it is never orphaned.
+- The runtime's `/slots` endpoint, which reports prompts in progress, is turned
+  off (`--no-slots`) where supported.
+- `runtime.gpu_layers` accepts `"auto"` and `"all"` as well as a count.
+- A `llama-server` shipped beside the Cordon executable is found before one on
+  `PATH`.
+- The repository URL in the crate metadata named the wrong organisation.
+
+### Changed
+
+- The operator console reads as an application rather than a stack of
+  uppercase monospace labels: sentence-case section titles and labels, the
+  platform's own UI font, small radii, no animated page transitions, and
+  shorter, plainer copy throughout. Views are renamed Overview, Attestation,
+  Audit log, Inference, Model store and API reference. Loaded with
+  `?shell=desktop` it also drops browser affordances.
+- Minimum Rust version is 1.89, for `File::try_lock`.
+
 ### Cordon can now be a trusted execution environment
 
 `attestation.measurement_source = "sev_snp"` runs Cordon inside an AMD SEV-SNP

@@ -46,3 +46,9 @@ Thumbs.db
 
 # Local scratch
 /test.json
+
+# ── Desktop app ────────────────────────────────────────────────────────────
+# The bundled llama.cpp is fetched by scripts/fetch-llama, not committed.
+/desktop/src-tauri/llama/
+/desktop/src-tauri/gen/
+/desktop/node_modules/

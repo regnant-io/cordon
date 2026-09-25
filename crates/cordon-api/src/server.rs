@@ -14,6 +14,13 @@
 //! handshake deadline, a cap on concurrent connections, and per-connection
 //! cleanup on drop. Without those, opening sockets and never completing a
 //! handshake is enough to exhaust the process.
+//!
+//! Shutdown is graceful on every listener, the console's included: in-flight
+//! requests finish and idle keep-alive connections are closed. That matters
+//! beyond tidiness. Each open connection holds the node, and a node that is
+//! still held keeps its audit log claimed, so a process that stops one node
+//! and starts another, as the desktop app does when its settings change,
+//! would otherwise find the log still locked by a browser's idle socket.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -48,6 +55,9 @@ use crate::{
 /// How often the audit chain is re-verified in the background.
 const CHAIN_VERIFY_INTERVAL: Duration = Duration::from_secs(300);
 
+/// How long shutdown waits for open connections to finish.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The Cordon HTTP server.
 pub struct ApiServer {
     node: Arc<CordonNode>,
@@ -69,11 +79,22 @@ impl ApiServer {
         }
     }
 
-    /// Serve until `shutdown` resolves.
+    /// Serve until `shutdown` resolves, then stop every listener and the node.
     pub async fn run<F>(self, shutdown: F) -> Result<()>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        // One token for everything this server started. The caller's future
+        // cancels it; each listener drains on it.
+        let stopping = tokio_util::sync::CancellationToken::new();
+        {
+            let stopping = stopping.clone();
+            tokio::spawn(async move {
+                shutdown.await;
+                stopping.cancel();
+            });
+        }
+
         let chain_health = Arc::new(ChainHealth::new());
         chain_health
             .clone()
@@ -87,11 +108,11 @@ impl ApiServer {
         // Metrics share the API listener but are gated on a loopback peer.
         let router = build_api_router(state.clone()).merge(build_metrics_router(state.clone()));
 
-        let ui_handle = self.spawn_console(state)?;
-
         let listener = tokio::net::TcpListener::bind(&self.bind_addr)
             .await
             .with_context(|| format!("cannot bind to {}", self.bind_addr))?;
+
+        let ui_handle = self.spawn_console(state, stopping.clone()).await?;
 
         let limits = self.node.config.limits.clone();
 
@@ -102,11 +123,12 @@ impl ApiServer {
                     "Serving plain HTTP; client identity is taken from a header and is \
                      spoofable. Development only."
                 );
+                let stopping = stopping.clone();
                 axum::serve(
                     listener,
                     router.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                .with_graceful_shutdown(shutdown)
+                .with_graceful_shutdown(async move { stopping.cancelled().await })
                 .await
                 .context("server error")?;
             }
@@ -129,10 +151,10 @@ impl ApiServer {
                 let handshake_timeout =
                     Duration::from_secs(limits.tls_handshake_timeout_seconds.max(1));
 
-                tokio::pin!(shutdown);
+                let connections_done = tokio_util::task::TaskTracker::new();
                 loop {
                     tokio::select! {
-                        _ = &mut shutdown => {
+                        _ = stopping.cancelled() => {
                             tracing::info!("Shutdown requested; no longer accepting connections");
                             break;
                         }
@@ -157,13 +179,15 @@ impl ApiServer {
 
                             let acceptor = acceptor.clone();
                             let router = router.clone();
-                            tokio::spawn(async move {
+                            let stopping = stopping.clone();
+                            connections_done.spawn(async move {
                                 serve_tls_connection(
                                     acceptor,
                                     tcp,
                                     peer,
                                     router,
                                     handshake_timeout,
+                                    stopping,
                                 )
                                 .await;
                                 drop(permit);
@@ -171,18 +195,38 @@ impl ApiServer {
                         }
                     }
                 }
+                connections_done.close();
+                if tokio::time::timeout(DRAIN_TIMEOUT, connections_done.wait())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Connections still open after the drain period; closing them");
+                }
             }
         }
 
+        // The API listener has stopped whatever the reason, so the console
+        // stops with it.
+        stopping.cancel();
         if let Some(handle) = ui_handle {
-            handle.abort();
+            if tokio::time::timeout(DRAIN_TIMEOUT, handle).await.is_err() {
+                tracing::warn!("The operator console did not drain in time");
+            }
         }
         self.node.shutdown().await;
         Ok(())
     }
 
     /// Start the operator console on its own loopback listener, if enabled.
-    fn spawn_console(&self, state: AppState) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    ///
+    /// The listener is bound before this returns, so a port that is already
+    /// taken is a startup error rather than a line in the log after the node
+    /// has announced itself as serving.
+    async fn spawn_console(
+        &self,
+        state: AppState,
+        stopping: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>> {
         let ui = &self.node.config.ui;
         if !ui.enabled {
             return Ok(None);
@@ -203,15 +247,17 @@ impl ApiServer {
         }
 
         let router = build_ui_router(state);
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("cannot bind the operator console to {}", addr))?;
+        tracing::info!(%addr, "Operator console at http://{}", addr);
+
         let handle = tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    tracing::info!(%addr, "Operator console at http://{}", addr);
-                    if let Err(e) = axum::serve(listener, router).await {
-                        tracing::error!("operator console stopped: {}", e);
-                    }
-                }
-                Err(e) => tracing::error!(%addr, "cannot bind the operator console: {}", e),
+            if let Err(e) = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { stopping.cancelled().await })
+                .await
+            {
+                tracing::error!("operator console stopped: {}", e);
             }
         });
 
@@ -226,6 +272,7 @@ async fn serve_tls_connection(
     peer: SocketAddr,
     router: axum::Router,
     handshake_timeout: Duration,
+    stopping: tokio_util::sync::CancellationToken,
 ) {
     // An unauthenticated peer must not be able to hold a connection open by
     // stalling mid-handshake.
@@ -272,10 +319,19 @@ async fn serve_tls_connection(
     });
 
     let io = TokioIo::new(tls_stream);
-    if let Err(e) = AutoBuilder::new(TokioExecutor::new())
-        .serve_connection_with_upgrades(io, TowerToHyperService::new(service))
-        .await
-    {
+    let builder = AutoBuilder::new(TokioExecutor::new());
+    let connection = builder.serve_connection_with_upgrades(io, TowerToHyperService::new(service));
+    tokio::pin!(connection);
+
+    let result = tokio::select! {
+        result = connection.as_mut() => result,
+        _ = stopping.cancelled() => {
+            // Finish what is in flight, accept nothing new on this connection.
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    };
+    if let Err(e) = result {
         tracing::debug!(%peer, "connection closed: {}", e);
     }
 }

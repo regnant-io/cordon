@@ -914,3 +914,44 @@ async fn tamper_findings_are_recorded() {
         "a tamper finding should survive the process that made it"
     );
 }
+
+// ── Local signing key ────────────────────────────────────────────────────────
+
+/// Without a Client Master Key, a node used to generate fresh signing keys at
+/// every boot, so a restart made every earlier audit entry fail verification
+/// and the chain read as broken. A local key keeps the chain verifying across
+/// restarts, and says plainly that it is the node's word only.
+#[tokio::test]
+async fn a_local_key_keeps_the_audit_chain_verifying_across_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path(), "local-key");
+    config.local_key_path = Some(dir.path().join("node.key"));
+
+    let first = Arc::new(CordonNode::build(config.clone()).await.unwrap());
+    first.go_operational().unwrap();
+    assert_eq!(first.key_provenance().as_str(), "local");
+    infer(&first, "alice", "before the restart").await.unwrap();
+    let first_key = first.log_verifying_key_hex();
+    first.shutdown().await;
+    drop(first);
+
+    let second = Arc::new(CordonNode::build(config).await.unwrap());
+    second.go_operational().unwrap();
+    infer(&second, "alice", "after the restart").await.unwrap();
+
+    assert_eq!(second.log_verifying_key_hex(), first_key);
+    assert!(
+        second.audit_chain_valid(),
+        "the chain must verify across a restart with a local key"
+    );
+}
+
+#[tokio::test]
+async fn a_local_key_is_refused_outside_light_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path(), "local-key-vault");
+    config.mode = DeploymentMode::Vault;
+    config.local_key_path = Some(dir.path().join("node.key"));
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("local_key_path"), "got: {}", err);
+}

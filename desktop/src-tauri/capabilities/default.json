@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "launcher",
+  "description": "The launcher page bundled with the app. The operator console is served from a loopback origin and is deliberately not listed here, so it cannot reach any command.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

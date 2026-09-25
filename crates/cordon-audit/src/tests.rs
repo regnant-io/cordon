@@ -380,8 +380,8 @@ fn a_second_writer_is_refused_rather_than_forking_the_chain() {
         "the refusal should name the cause: {}",
         err
     );
-    // And it should say what to do, including how to recover from a crash.
-    assert!(err.contains("did not shut down cleanly"), "got: {}", err);
+    // And it should say what to do about it.
+    assert!(err.contains("Stop the other node"), "got: {}", err);
 
     // The first log is unaffected and still verifies.
     let vk = SigningKey::from_seed(&[1u8; 32]).verifying_key();
@@ -408,6 +408,39 @@ fn the_claim_is_released_when_the_log_is_dropped() {
     let result = verify_log_chain(dir.path(), &vk, "deployment-1").unwrap();
     assert!(result.valid, "violations: {:?}", result.violations);
     assert_eq!(result.entries_verified, 3);
+}
+
+/// A node that is killed, or crashes, never runs its destructor, so a claim
+/// that is a file's existence would outlive it and refuse every later start
+/// until someone deleted the file by hand. The claim is a lock the operating
+/// system holds for the process instead; a file left behind by an earlier
+/// version, or by a writer that died, is not a claim.
+#[test]
+fn a_leftover_claim_file_from_a_dead_writer_does_not_block_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let log = AuditLog::open(config(dir.path()), SigningKey::from_seed(&[4u8; 32])).unwrap();
+        log.append(event("before the crash")).unwrap();
+    }
+    std::fs::write(
+        dir.path().join(".cordon-writer.lock"),
+        "node_id=crashed
+pid=4294967295
+since=2020-01-01T00:00:00Z
+",
+    )
+    .unwrap();
+
+    let reopened = AuditLog::open(config(dir.path()), SigningKey::from_seed(&[4u8; 32]))
+        .expect("a claim file with no live holder must not block a start");
+    reopened.append(event("after the crash")).unwrap();
+
+    let vk = SigningKey::from_seed(&[4u8; 32]).verifying_key();
+    assert!(
+        verify_log_chain(dir.path(), &vk, "deployment-1")
+            .unwrap()
+            .valid
+    );
 }
 
 /// The lock file must not be mistaken for a log segment.

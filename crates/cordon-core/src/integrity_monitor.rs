@@ -138,16 +138,23 @@ impl IntegrityMonitor {
             })?
     }
 
-    /// Start the background integrity monitoring loop.
-    pub fn start(self: Arc<Self>) {
+    /// Start the background integrity monitoring loop, which runs until
+    /// `stop` is cancelled.
+    pub fn start(self: Arc<Self>, stop: tokio_util::sync::CancellationToken) {
         let interval_secs = self.interval_minutes.max(1) * 60;
         tokio::spawn(async move {
             // Initial delay; let the node finish coming up before the first check.
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+            }
 
             let mut ticker = interval(Duration::from_secs(interval_secs));
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = ticker.tick() => {}
+                }
 
                 // Once tamper is confirmed the bundle is already out of service
                 // and the node is quarantined; re-hashing it every interval adds

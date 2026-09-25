@@ -158,6 +158,18 @@ impl NodeState {
         self.enclave_state = EnclaveState::Active;
     }
 
+    /// Return a degraded node to healthy, and nothing else.
+    ///
+    /// For recovery from a transient fault the node detected itself. A node in
+    /// quarantine, locked, or zeroized is left exactly as it is: leaving those
+    /// states is an operator decision, never a side effect of a fault clearing.
+    pub fn recover_from_degraded(&mut self) {
+        if self.status == NodeStatus::Degraded {
+            self.status = NodeStatus::Healthy;
+            self.enclave_state = EnclaveState::Active;
+        }
+    }
+
     /// Mark the node degraded: still serving, but something is wrong.
     ///
     /// Deliberately does not downgrade a node that has already entered
@@ -230,5 +242,38 @@ impl SharedNodeState {
                 state.stats.latency_ms_p99 = (state.stats.latency_ms_p99 * 19 + latency_ms) / 20;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node() -> NodeState {
+        let mut state = NodeState::new("n".into(), "d".into());
+        state.go_operational();
+        state
+    }
+
+    #[test]
+    fn a_degraded_node_recovers_when_the_fault_clears() {
+        let mut state = node();
+        state.degrade("runtime restarting");
+        assert_eq!(state.status, NodeStatus::Degraded);
+        state.recover_from_degraded();
+        assert_eq!(state.status, NodeStatus::Healthy);
+    }
+
+    /// The runtime supervisor recovers the node after restarting a crashed
+    /// runtime. If the node was quarantined in the meantime, by a tamper
+    /// finding or by an operator, a runtime coming back must not lift that.
+    #[test]
+    fn recovering_from_a_fault_never_lifts_a_quarantine() {
+        let mut state = node();
+        state.degrade("runtime restarting");
+        state.enter_quarantine();
+        state.recover_from_degraded();
+        assert_eq!(state.status, NodeStatus::Quarantine);
+        assert!(!state.can_serve());
     }
 }

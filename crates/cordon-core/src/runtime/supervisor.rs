@@ -23,7 +23,17 @@
 //!
 //! The child is terminated when the supervisor is dropped and when the process
 //! exits, and it is restarted automatically if it dies while Cordon is running.
+//! On Windows it is also placed in a job object that kills it when the job
+//! handle closes, so it cannot outlive a Cordon that crashed or was killed
+//! outright, and it is started without a console window, so a desktop build
+//! does not flash one on screen.
+//!
+//! Slots share one KV cache (`--kv-unified`) when the binary supports it.
+//! Without that, llama.cpp divides `--ctx-size` evenly between `--parallel`
+//! slots, and a 4096-token context split 32 ways leaves each request 128
+//! tokens: long conversations would fail on a node that looked healthy.
 
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -34,6 +44,7 @@ use parking_lot::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
+use crate::config::GpuLayers;
 use crate::error::{CordonError, CordonResult};
 
 /// Lines of child stderr retained for diagnostics.
@@ -55,7 +66,7 @@ pub struct LlamaRuntimeConfig {
     /// Context window size passed to the runtime.
     pub ctx_size: u32,
     /// Layers to offload to the GPU. Zero keeps the model on the CPU.
-    pub gpu_layers: u32,
+    pub gpu_layers: GpuLayers,
     /// Generation threads. `None` lets llama.cpp choose.
     pub threads: Option<u32>,
     /// Parallel decoding slots. Should be at least Cordon's concurrency limit.
@@ -73,7 +84,7 @@ impl LlamaRuntimeConfig {
             binary,
             model_path,
             ctx_size: 4096,
-            gpu_layers: 0,
+            gpu_layers: GpuLayers::Count(0),
             threads: None,
             parallel_slots: 4,
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
@@ -89,6 +100,13 @@ struct SupportedFlags {
     no_webui: bool,
     /// `--api-key-file` reads the key from a file instead of the command line.
     api_key_file: bool,
+    /// `--kv-unified` lets every slot draw on the whole context window.
+    kv_unified: bool,
+    /// `--no-slots` removes the slot-inspection endpoint, which reports the
+    /// prompts currently being processed.
+    no_slots: bool,
+    /// `--n-gpu-layers` accepts `auto` and `all` as well as a count.
+    gpu_layer_words: bool,
 }
 
 /// A running, supervised llama.cpp server.
@@ -102,9 +120,13 @@ pub struct LlamaSupervisor {
     /// because a restart re-launches the child against the same file.
     api_key_file: Option<tempfile::NamedTempFile>,
     child: Arc<Mutex<Option<Child>>>,
-    stderr_ring: Arc<Mutex<Vec<String>>>,
+    stderr_ring: Arc<Mutex<VecDeque<String>>>,
     flags: SupportedFlags,
     http: reqwest::Client,
+    /// Job object every child is assigned to. Closing it, which happens when
+    /// this process exits by any route, terminates the child.
+    #[cfg(windows)]
+    job: Option<win32job::Job>,
 }
 
 impl LlamaSupervisor {
@@ -155,15 +177,28 @@ impl LlamaSupervisor {
                 CordonError::Internal(format!("cannot build runtime HTTP client: {}", e))
             })?;
 
+        if !flags.kv_unified && config.parallel_slots > 1 {
+            tracing::warn!(
+                ctx_size = config.ctx_size,
+                parallel = config.parallel_slots,
+                per_slot = config.ctx_size / config.parallel_slots.max(1),
+                "llama-server does not accept --kv-unified, so the context window is \
+                 divided between slots. Raise runtime.context_size or lower \
+                 inference.max_concurrent_requests if requests are cut short."
+            );
+        }
+
         let supervisor = Self {
             config,
             endpoint,
             api_key,
             api_key_file,
             child: Arc::new(Mutex::new(None)),
-            stderr_ring: Arc::new(Mutex::new(Vec::new())),
+            stderr_ring: Arc::new(Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY))),
             flags,
             http,
+            #[cfg(windows)]
+            job: kill_on_close_job(),
         };
 
         supervisor.spawn_child().await?;
@@ -190,12 +225,17 @@ impl LlamaSupervisor {
             api_key: generate_api_key(),
             api_key_file: None,
             child: Arc::new(Mutex::new(None)),
-            stderr_ring: Arc::new(Mutex::new(Vec::new())),
+            stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
             flags: SupportedFlags {
                 no_webui: true,
                 api_key_file: true,
+                kv_unified: true,
+                no_slots: true,
+                gpu_layer_words: true,
             },
             http: reqwest::Client::new(),
+            #[cfg(windows)]
+            job: None,
         }
     }
 
@@ -227,10 +267,18 @@ impl LlamaSupervisor {
             .arg(self.endpoint.port().to_string())
             .arg("--ctx-size")
             .arg(self.config.ctx_size.to_string())
-            .arg("--n-gpu-layers")
-            .arg(self.config.gpu_layers.to_string())
             .arg("--parallel")
             .arg(self.config.parallel_slots.to_string());
+
+        if let Some(layers) = gpu_layers_arg(self.config.gpu_layers, self.flags.gpu_layer_words) {
+            cmd.arg("--n-gpu-layers").arg(layers);
+        }
+        if self.flags.kv_unified {
+            cmd.arg("--kv-unified");
+        }
+        if self.flags.no_slots {
+            cmd.arg("--no-slots");
+        }
 
         match &self.api_key_file {
             Some(file) => {
@@ -257,6 +305,7 @@ impl LlamaSupervisor {
             // If Cordon dies, the runtime must not outlive it holding the model
             // and the port.
             .kill_on_drop(true);
+        hide_console_window(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
             CordonError::RuntimeUnavailable(format!(
@@ -266,6 +315,17 @@ impl LlamaSupervisor {
             ))
         })?;
 
+        #[cfg(windows)]
+        if let (Some(job), Some(handle)) = (&self.job, child.raw_handle()) {
+            if let Err(e) = job.assign_process(handle as isize) {
+                tracing::warn!(
+                    "cannot place llama-server in a job object ({}); it may outlive \
+                     Cordon if Cordon is killed rather than stopped",
+                    e
+                );
+            }
+        }
+
         if let Some(stderr) = child.stderr.take() {
             let ring = self.stderr_ring.clone();
             tokio::spawn(async move {
@@ -274,9 +334,9 @@ impl LlamaSupervisor {
                     tracing::debug!(target: "llama", "{}", line);
                     let mut ring = ring.lock();
                     if ring.len() >= LOG_RING_CAPACITY {
-                        ring.remove(0);
+                        ring.pop_front();
                     }
-                    ring.push(line);
+                    ring.push_back(line);
                 }
             });
         }
@@ -413,7 +473,7 @@ impl LlamaSupervisor {
     pub fn recent_logs(&self, n: usize) -> Vec<String> {
         let ring = self.stderr_ring.lock();
         let start = ring.len().saturating_sub(n);
-        ring[start..].to_vec()
+        ring.iter().skip(start).cloned().collect()
     }
 
     /// Restart the child after an unexpected exit.
@@ -442,6 +502,51 @@ impl Drop for LlamaSupervisor {
         // intent explicit and covers a child taken out of the mutex.
         if let Some(mut child) = self.child.lock().take() {
             let _ = child.start_kill();
+        }
+    }
+}
+
+/// The `--n-gpu-layers` value for a setting, or `None` to leave the flag off.
+///
+/// A binary too old to understand `auto` gets no flag at all for it, which is
+/// its own default, rather than a word it would refuse to start with. `all`
+/// becomes a count larger than any model's layer count, which every build
+/// accepts.
+fn gpu_layers_arg(layers: GpuLayers, words_supported: bool) -> Option<String> {
+    match (layers, words_supported) {
+        (GpuLayers::Count(n), _) => Some(n.to_string()),
+        (GpuLayers::Auto, true) => Some("auto".into()),
+        (GpuLayers::Auto, false) => None,
+        (GpuLayers::All, true) => Some("all".into()),
+        (GpuLayers::All, false) => Some("999".into()),
+    }
+}
+
+/// Start a child without a console window of its own.
+///
+/// `llama-server` is a console program. Launched from a process that has no
+/// console, which is every desktop build, Windows would otherwise open a
+/// window for it and for every `--help` probe.
+fn hide_console_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// A job object that terminates its processes when its last handle closes.
+#[cfg(windows)]
+fn kill_on_close_job() -> Option<win32job::Job> {
+    let mut info = win32job::ExtendedLimitInfo::new();
+    info.limit_kill_on_job_close();
+    match win32job::Job::create_with_limit_info(&info) {
+        Ok(job) => Some(job),
+        Err(e) => {
+            tracing::warn!("cannot create a job object for the runtime: {}", e);
+            None
         }
     }
 }
@@ -514,14 +619,14 @@ fn write_api_key_file(api_key: &str) -> CordonResult<tempfile::NamedTempFile> {
 /// The help text is read once and searched for every flag, rather than
 /// launching the binary again per flag.
 async fn probe_supported_flags(binary: &Path) -> SupportedFlags {
-    let output = Command::new(binary)
-        .arg("--help")
+    let mut cmd = Command::new(binary);
+    cmd.arg("--help")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await;
+        .kill_on_drop(true);
+    hide_console_window(&mut cmd);
+    let output = cmd.output().await;
 
     match output {
         Ok(out) => {
@@ -530,22 +635,40 @@ async fn probe_supported_flags(binary: &Path) -> SupportedFlags {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
-            SupportedFlags {
-                no_webui: text.contains("--no-webui"),
-                api_key_file: text.contains("--api-key-file"),
-            }
+            SupportedFlags::from_help(&text)
         }
-        // A binary whose help cannot be read is assumed to support neither, so
+        // A binary whose help cannot be read is assumed to support none, so
         // the failure is a loud warning rather than a flag the child rejects.
-        Err(_) => SupportedFlags {
-            no_webui: false,
-            api_key_file: false,
-        },
+        Err(_) => SupportedFlags::from_help(""),
     }
 }
 
-/// Locate a `llama-server` binary: the explicit override first, then `PATH`,
-/// then the conventional install locations.
+impl SupportedFlags {
+    fn from_help(text: &str) -> Self {
+        SupportedFlags {
+            no_webui: text.contains("--no-webui"),
+            api_key_file: text.contains("--api-key-file"),
+            kv_unified: text.contains("--kv-unified"),
+            no_slots: text.contains("--no-slots"),
+            gpu_layer_words: text.contains("'auto', or 'all'"),
+        }
+    }
+}
+
+/// The runtime's executable name on this platform.
+pub const LLAMA_SERVER_EXE: &str = if cfg!(windows) {
+    "llama-server.exe"
+} else {
+    "llama-server"
+};
+
+/// Locate a `llama-server` binary: the explicit override first, then
+/// `CORDON_LLAMA_SERVER`, then a copy shipped alongside Cordon itself, then
+/// `PATH`, then the conventional install locations.
+///
+/// A bundled copy wins over `PATH` because a distribution that ships one has
+/// tested Cordon against that build; a different llama.cpp that happens to be
+/// installed system-wide has not been.
 pub fn discover_llama_server(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
         return path.exists().then(|| path.to_path_buf());
@@ -558,11 +681,15 @@ pub fn discover_llama_server(explicit: Option<&Path>) -> Option<PathBuf> {
         }
     }
 
-    let exe = if cfg!(windows) {
-        "llama-server.exe"
-    } else {
-        "llama-server"
-    };
+    let exe = LLAMA_SERVER_EXE;
+
+    if let Some(bundled) = std::env::current_exe()
+        .ok()
+        .and_then(|me| me.parent().map(Path::to_path_buf))
+        .and_then(|dir| bundled_candidates(&dir).into_iter().find(|p| p.is_file()))
+    {
+        return Some(bundled);
+    }
 
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
@@ -585,9 +712,78 @@ pub fn discover_llama_server(explicit: Option<&Path>) -> Option<PathBuf> {
     conventional.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
+/// Where a distribution places `llama-server` relative to the directory
+/// holding the Cordon executable.
+fn bundled_candidates(exe_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        exe_dir.join(LLAMA_SERVER_EXE),
+        exe_dir.join("llama").join(LLAMA_SERVER_EXE),
+        // A macOS application bundle keeps resources beside, not inside,
+        // `Contents/MacOS`.
+        exe_dir
+            .join("..")
+            .join("Resources")
+            .join("llama")
+            .join(LLAMA_SERVER_EXE),
+        // Linux packages install resources under `/usr/lib/<product>`.
+        exe_dir
+            .join("..")
+            .join("lib")
+            .join("cordon")
+            .join("llama")
+            .join(LLAMA_SERVER_EXE),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_layer_settings_become_flags_the_binary_accepts() {
+        assert_eq!(
+            gpu_layers_arg(GpuLayers::Count(0), false).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            gpu_layers_arg(GpuLayers::Count(20), true).as_deref(),
+            Some("20")
+        );
+        assert_eq!(
+            gpu_layers_arg(GpuLayers::Auto, true).as_deref(),
+            Some("auto")
+        );
+        assert_eq!(gpu_layers_arg(GpuLayers::Auto, false), None);
+        assert_eq!(gpu_layers_arg(GpuLayers::All, true).as_deref(), Some("all"));
+        assert_eq!(
+            gpu_layers_arg(GpuLayers::All, false).as_deref(),
+            Some("999")
+        );
+    }
+
+    #[test]
+    fn flags_are_read_from_the_help_text() {
+        let flags = SupportedFlags::from_help(
+            "-ngl, --n-gpu-layers N  either an exact number, 'auto', or 'all'\n\
+             -kvu, --kv-unified, -no-kvu\n--slots, --no-slots\n--no-webui\n--api-key-file FNAME",
+        );
+        assert!(flags.no_webui && flags.api_key_file && flags.kv_unified);
+        assert!(flags.no_slots && flags.gpu_layer_words);
+
+        let none = SupportedFlags::from_help("usage: llama-server [options]");
+        assert!(!none.no_webui && !none.api_key_file && !none.kv_unified);
+        assert!(!none.no_slots && !none.gpu_layer_words);
+    }
+
+    #[test]
+    fn a_bundled_runtime_is_looked_for_beside_the_executable() {
+        let dir = Path::new("/opt/cordon/bin");
+        let candidates = bundled_candidates(dir);
+        assert_eq!(candidates[0], dir.join(LLAMA_SERVER_EXE));
+        assert!(candidates
+            .iter()
+            .any(|p| p.ends_with(Path::new("llama").join(LLAMA_SERVER_EXE))));
+    }
 
     #[test]
     fn reserved_port_is_loopback_and_nonzero() {

@@ -14,6 +14,10 @@
 (function () {
   var root = document.documentElement;
   function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+  /* The desktop app loads this page with ?shell=desktop. It changes chrome
+     and interaction details only; every request is the same one a browser
+     would make. */
+  if (new URLSearchParams(location.search).get('shell') === 'desktop') root.setAttribute('data-shell', 'desktop');
   var theme = stored('cordon.theme');
   if (theme === 'dark' || theme === 'light') root.setAttribute('data-theme', theme);
   var drawer  = matchMedia('(max-width: 760px)').matches;
@@ -47,15 +51,16 @@
 
 :root {
   /* -- Type -------------------------------------------------------------- */
-  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono",
-          "Cascadia Mono", "Cascadia Code", Menlo, Consolas,
-          "DejaVu Sans Mono", "Liberation Mono", monospace;
-  --sans: "Archivo", "Inter", system-ui, -apple-system, BlinkMacSystemFont,
-          "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue",
-          "Noto Sans", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", SFMono-Regular, Menlo,
+          Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  /* The platform's own UI face first: on a desktop the console should read
+     like the rest of the operating system, not like a web page. */
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+          "Segoe UI", "Inter", Roboto, "Helvetica Neue", "Noto Sans", Arial,
+          sans-serif;
 
-  --fs-micro: 10.5px;
-  --fs-tiny:  11.5px;
+  --fs-micro: 11px;
+  --fs-tiny:  12px;
   --fs-sm:    12.5px;
   --fs-base:  13.5px;
   --fs-md:    15px;
@@ -63,14 +68,14 @@
   --fs-xl:    26px;
   --fs-2xl:   32px;
 
-  --track-label: .09em;
+  --track-label: 0;
 
   /* -- Space (4px base) -------------------------------------------------- */
   --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 20px;
   --s6: 24px; --s7: 28px; --s8: 32px; --s10: 40px; --s12: 48px; --s16: 64px;
 
-  /* -- Radii - square, like the source palette --------------------------- */
-  --r1: 0; --r2: 0; --r3: 0; --r4: 0; --r-pill: 999px;
+  /* -- Radii ------------------------------------------------------------- */
+  --r1: 3px; --r2: 5px; --r3: 7px; --r4: 10px; --r-pill: 999px;
 
   /* -- Motion ------------------------------------------------------------ */
   --dur1: 110ms; --dur2: 170ms; --dur3: 260ms;
@@ -320,24 +325,21 @@ a { color: var(--accent); text-underline-offset: 2px; }
    consistently, it is what makes the density read as deliberate rather than
    as cramped. */
 .label {
-  font-family: var(--mono);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   font-weight: 500;
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
   color: var(--text-3);
 }
 
+/* A region's title. */
 .eyebrow {
-  font-family: var(--mono);
-  font-size: var(--fs-micro);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-  color: var(--text-3);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
   display: flex; align-items: center; gap: var(--s2);
 }
-/* The identity tick: a 3px accent square opening every titled region. */
-.eyebrow::before { content: ""; width: 3px; height: 3px; flex: none; background: var(--accent); }
+/* The page title already says which section this is, and so does the top
+   bar; a third copy above the title is noise. */
+.page-head .eyebrow { display: none; }
 
 .prose { color: var(--text-2); font-size: var(--fs-base); line-height: 1.6; max-width: 70ch; }
 .prose strong { color: var(--text); font-weight: 600; }
@@ -388,21 +390,20 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .brand-core { fill: var(--accent); }
 .brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .brand-name {
-  font-family: var(--mono);
-  font-size: 13px; font-weight: 600;
-  letter-spacing: .16em; text-transform: uppercase;
+  font-size: 14px; font-weight: 650;
+  letter-spacing: -.01em;
   line-height: 1;
 }
 .brand-sub {
-  font-size: 10px; color: var(--text-3);
-  letter-spacing: .04em; line-height: 1;
+  font-size: var(--fs-micro); color: var(--text-3);
+  line-height: 1.1;
 }
 
 .rail-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--s4) 0 var(--s6); }
 
 .nav-group { padding: 0 var(--s3); }
 .nav-group + .nav-group { margin-top: var(--s5); }
-.nav-group > .label { padding: 0 var(--s3) var(--s2); display: block; }
+.nav-group > .label { padding: 0 var(--s3) var(--s1); display: block; font-size: var(--fs-micro); }
 
 .nav-item {
   position: relative;
@@ -544,15 +545,14 @@ kbd {
    identical to a healthy one unless something says so. */
 .pip {
   display: flex; align-items: center; gap: var(--s2);
-  font-family: var(--mono); font-size: var(--fs-micro);
-  letter-spacing: .06em; text-transform: uppercase;
+  font-size: var(--fs-tiny);
   color: var(--text-3);
   padding: var(--s1) var(--s2);
   border-radius: var(--r2);
 }
 .pip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex: none; }
 .pip[data-state="live"]    { color: var(--jade); }
-.pip[data-state="live"] .pip-dot { background: var(--jade); animation: pulse 2.4s var(--ease) infinite; }
+.pip[data-state="live"] .pip-dot { background: var(--jade); }
 .pip[data-state="stale"]   { color: var(--amber); }
 .pip[data-state="stale"] .pip-dot { background: var(--amber); }
 .pip[data-state="offline"] { color: var(--crimson); }
@@ -566,11 +566,6 @@ kbd {
 :root[data-conn="offline"] .readout dd,
 :root[data-conn="offline"] .spark,
 :root[data-conn="offline"] .meter { opacity: .5; transition: opacity var(--dur3) var(--ease); }
-
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(61,217,164,.5); }
-  50%      { box-shadow: 0 0 0 4px rgba(61,217,164,0); }
-}
 
 .icon-btn {
   width: 30px; height: 30px; flex: none;
@@ -594,10 +589,6 @@ kbd {
 
 .view { display: none; }
 .view[data-active] { display: block; }
-/* Panels arrive with a short rise. Long enough to show which region changed,
-   short enough that a fast operator never waits on it. */
-.view[data-active] > * { animation: rise var(--dur3) var(--ease-out) both; }
-@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 /* Views that own their own scrolling (the inference console) opt out. */
 .view--fill { height: 100%; }
@@ -630,9 +621,7 @@ kbd {
   padding: 0 var(--pad);
   border-top: 1px solid var(--line);
   background: var(--surface);
-  font-family: var(--mono);
   font-size: var(--fs-micro);
-  letter-spacing: .04em;
   color: var(--text-3);
   overflow-x: auto; overflow-y: hidden;
   white-space: nowrap;
@@ -739,13 +728,13 @@ kbd {
 
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
-  font-family: var(--mono);
+  font-family: var(--sans);
+  letter-spacing: 0;
   font-size: var(--fs-micro);
-  font-weight: 500;
-  letter-spacing: .07em;
-  text-transform: uppercase;
-  padding: 2px var(--s2);
-  border-radius: var(--r1);
+  font-weight: 550;
+  line-height: 1.45;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
   border: 1px solid transparent;
   white-space: nowrap;
   vertical-align: middle;
@@ -821,10 +810,9 @@ kbd {
   border-radius: var(--r2);
 }
 .segmented button {
-  font-family: var(--mono);
-  font-size: var(--fs-micro);
-  letter-spacing: .06em; text-transform: uppercase;
-  padding: 3px var(--s2);
+  font-size: var(--fs-tiny);
+  font-variant-numeric: tabular-nums;
+  padding: 2px var(--s2);
   border-radius: var(--r1);
   color: var(--text-3);
   transition: background var(--dur1) var(--ease), color var(--dur1) var(--ease);
@@ -963,11 +951,8 @@ button.ledger-item:hover .ledger-go { color: var(--accent); transform: translate
 .table-wrap { width: 100%; overflow-x: auto; }
 table.data { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 table.data th {
-  font-family: var(--mono);
-  font-size: var(--fs-micro);
-  font-weight: 500;
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
+  font-size: var(--fs-tiny);
+  font-weight: 550;
   color: var(--text-3);
   text-align: left;
   padding: var(--s2) var(--s3);
@@ -1089,8 +1074,13 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
 /* The inference toolbar carries six controls in a column that also hosts the
    inspector. These are sized so it stays on one row at a laptop width and
    wraps cleanly rather than scrolling when it cannot. */
-#c-model  { width: 150px; }
-#c-client { width: 104px; }
+/* The model field takes the slack: model IDs are long, and it is the one
+   value here worth reading in full. */
+.console-bar .field-row:first-child { flex: 1 1 180px; min-width: 140px; }
+#c-model  { width: 100%; }
+#c-client { width: 96px; }
+#c-tokens, #c-temp { width: 64px; }
+.console-bar .spacer { flex: 0 0 0; }
 
 /* A switch, because a checkbox at this density is a 13px target with no
    label affordance. */
@@ -1113,7 +1103,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
 .switch input:checked + .switch-track { background: var(--accent); border-color: var(--accent); }
 .switch input:checked + .switch-track::after { transform: translateX(13px); background: var(--on-accent); }
 .switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
-.switch-label { font-family: var(--mono); font-size: var(--fs-micro); letter-spacing: var(--track-label); text-transform: uppercase; color: var(--text-3); }
+.switch-label { font-size: var(--fs-sm); color: var(--text-2); }
 
 /* === States: empty, loading, error ======================================== */
 
@@ -1235,7 +1225,6 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
   border-top: 1px solid var(--line);
   background: var(--surface-2);
   font-size: var(--fs-micro); color: var(--text-3);
-  font-family: var(--mono); letter-spacing: .04em;
 }
 
 /* === Inference console ====================================================
@@ -1275,8 +1264,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
 .turn { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: var(--s3); }
 .turn-gutter { display: flex; flex-direction: column; align-items: flex-end; gap: var(--s1); padding-top: 1px; }
 .turn-role {
-  font-family: var(--mono); font-size: var(--fs-micro);
-  letter-spacing: var(--track-label); text-transform: uppercase;
+  font-size: var(--fs-tiny); font-weight: 600;
   color: var(--text-3);
 }
 .turn--user .turn-role { color: var(--accent); }
@@ -1338,8 +1326,8 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
 .composer-foot {
   display: flex; align-items: center; gap: var(--s3);
   margin-top: var(--s2);
-  font-family: var(--mono); font-size: var(--fs-micro);
-  letter-spacing: .04em; color: var(--text-3);
+  font-size: var(--fs-micro);
+  color: var(--text-3);
   flex-wrap: wrap;
 }
 
@@ -1434,8 +1422,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
   table.data.responsive td { border: none; padding: var(--s1) var(--s2); display: flex; gap: var(--s3); align-items: baseline; }
   table.data.responsive td::before {
     content: attr(data-label);
-    font-family: var(--mono); font-size: var(--fs-micro);
-    letter-spacing: var(--track-label); text-transform: uppercase;
+    font-size: var(--fs-micro); font-weight: 550;
     color: var(--text-3); flex: none; width: 88px;
   }
   table.data.responsive td.t-right { text-align: left; }
@@ -1497,6 +1484,23 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
   }
 }
 
+/* === Desktop shell ========================================================
+   Inside the desktop app the page is the application window, not a document
+   in a browser. Chrome is not selectable, controls take the arrow cursor as
+   native controls do, and the browser-only affordances are gone. Values an
+   operator copies (hashes, keys, transcript text) stay selectable.
+   ========================================================================= */
+
+:root[data-shell="desktop"] body { -webkit-user-select: none; user-select: none; cursor: default; }
+:root[data-shell="desktop"] :is(input, textarea, .readout dd, .code, .turn-body,
+  .copyable-text, table.data td, .prose, .page-desc, .ledger-verdict, .callout span) {
+  -webkit-user-select: text; user-select: text;
+}
+:root[data-shell="desktop"] :is(button, .ledger-item, .switch, select.input) { cursor: default; }
+:root[data-shell="desktop"] .skip { display: none; }
+:root[data-shell="desktop"] .rail-toggle { display: none !important; }
+:root[data-shell="desktop"] .topbar { padding-left: var(--s5); }
+
 /* A console is evidence. Printing one should produce a legible record. */
 @media print {
   body { height: auto; overflow: visible; background: #FFFFFF; }
@@ -1537,7 +1541,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
 
     <div class="rail-scroll">
       <nav class="nav-group" aria-labelledby="nav-g1">
-        <span class="label" id="nav-g1">Posture</span>
+        <span class="label" id="nav-g1">Monitor</span>
         <button class="nav-item" data-view="overview" aria-current="page">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
             <rect x="2" y="2" width="5" height="5" rx="1"></rect>
@@ -1545,12 +1549,12 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <rect x="2" y="9" width="5" height="5" rx="1"></rect>
             <rect x="9" y="9" width="5" height="5" rx="1"></rect>
           </svg>
-          <span class="nav-label">Node posture</span>
+          <span class="nav-label">Overview</span>
         </button>
       </nav>
 
       <nav class="nav-group" aria-labelledby="nav-g2">
-        <span class="label" id="nav-g2">Assurance</span>
+        <span class="label" id="nav-g2">Verify</span>
         <button class="nav-item" data-view="attestation">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
             <path d="M8 1.8 13 4v4.2c0 2.8-2.1 4.7-5 5.9-2.9-1.2-5-3.1-5-5.9V4Z"></path>
@@ -1566,13 +1570,13 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <circle cx="3.4" cy="8" r="1.1"></circle>
             <circle cx="3.4" cy="11.4" r="1.1"></circle>
           </svg>
-          <span class="nav-label">Audit chain</span>
+          <span class="nav-label">Audit log</span>
           <span class="nav-tag" id="nav-audit-tag">0</span>
         </button>
       </nav>
 
       <nav class="nav-group" aria-labelledby="nav-g3">
-        <span class="label" id="nav-g3">Operations</span>
+        <span class="label" id="nav-g3">Operate</span>
         <button class="nav-item" data-view="console">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2.5 3.5h11v7.2h-6L4.4 13V10.7H2.5Z"></path>
@@ -1588,6 +1592,14 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
           <span class="nav-label">Model store</span>
           <span class="nav-tag" id="nav-models-tag">0</span>
         </button>
+        <!-- Desktop app only: returns to the app's runtime settings. -->
+        <button class="nav-item" id="nav-runtime" hidden>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <path d="M2.5 4.5h6.2M11.6 4.5h1.9M2.5 11.5h1.9M7.3 11.5h6.2"></path>
+            <circle cx="10.1" cy="4.5" r="1.5"></circle><circle cx="5.8" cy="11.5" r="1.5"></circle>
+          </svg>
+          <span class="nav-label">Runtime settings</span>
+        </button>
       </nav>
 
       <nav class="nav-group" aria-labelledby="nav-g4">
@@ -1596,7 +1608,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
             <path d="m5.6 10.8-2.9-2.9 2.9-2.9M10.4 5l2.9 2.9-2.9 2.9"></path>
           </svg>
-          <span class="nav-label">API surface</span>
+          <span class="nav-label">API reference</span>
         </button>
       </nav>
     </div>
@@ -1634,19 +1646,19 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
       </button>
 
       <div class="crumbs">
-        <span class="label" id="crumb-section">Posture</span>
+        <span class="label" id="crumb-section">Monitor</span>
         <span class="crumb-sep" aria-hidden="true">/</span>
-        <h1 class="crumb-current" id="crumb-title">Node posture</h1>
+        <h1 class="crumb-current" id="crumb-title">Overview</h1>
       </div>
 
       <span class="spacer"></span>
 
       <div class="topbar-tools">
         <span class="pip" id="conn-pip" data-state="idle" title="Status poll">
-          <span class="pip-dot"></span><span id="conn-text">connecting</span>
+          <span class="pip-dot"></span><span id="conn-text">Connecting</span>
         </span>
-        <span class="badge" data-tone="neutral" id="top-state">unknown</span>
-        <button class="icon-btn" id="theme-btn" aria-label="Switch colour scheme" title="Switch colour scheme">
+        <span class="badge" data-tone="neutral" id="top-state">Unknown</span>
+        <button class="icon-btn" id="theme-btn" aria-label="Toggle dark theme" title="Toggle dark theme">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
             <circle cx="8" cy="8" r="3.1"></circle>
             <path d="M8 1.4v1.6M8 13v1.6M14.6 8H13M3 8H1.4M12.66 3.34l-1.13 1.13M4.47 11.53l-1.13 1.13M12.66 12.66l-1.13-1.13M4.47 4.47 3.34 3.34"></path>
@@ -1658,15 +1670,15 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
     <div class="viewport" id="content" tabindex="-1">
 
       <!-- ══ Posture ══════════════════════════════════════════════════════ -->
-      <section class="view" data-view="overview" data-active aria-label="Node posture">
+      <section class="view" data-view="overview" data-active aria-label="Overview">
         <div class="page">
 
           <div class="page-head">
             <div class="page-head-text">
-              <span class="eyebrow">Posture</span>
-              <h2 class="page-title">Node posture</h2>
-              <p class="page-desc">Everything this node will tell you about itself, and, separately, how much
-                of it a third party could check. The two are not the same, and this page keeps them apart.</p>
+              <span class="eyebrow">Monitor</span>
+              <h2 class="page-title">Overview</h2>
+              <p class="page-desc">Runtime health, and which of this node's security claims a third party
+                can verify.</p>
             </div>
             <div class="page-actions">
               <button class="btn" id="o-refresh">
@@ -1677,7 +1689,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
               <button class="btn btn--primary" data-goto="audit">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M2.6 8.3 6 11.7l7.4-7.4"></path>
-                </svg>Verify the chain
+                </svg>Verify audit log
               </button>
             </div>
           </div>
@@ -1686,13 +1698,13 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <div class="stat col-3" id="s-state" data-tone="neutral">
               <span class="stat-label label">Node state</span>
               <span class="stat-value" id="s-state-v">·</span>
-              <span class="stat-sub" id="s-state-sub">Awaiting first poll</span>
+              <span class="stat-sub" id="s-state-sub">Connecting…</span>
             </div>
 
             <div class="stat col-3" id="s-assurance" data-tone="neutral">
               <span class="stat-label label">Assurance</span>
               <span class="stat-value" id="s-assurance-v">·<span class="stat-unit">/ 4</span></span>
-              <span class="stat-sub" id="s-assurance-sub">Claims a third party could check</span>
+              <span class="stat-sub" id="s-assurance-sub">Independently verifiable claims</span>
             </div>
 
             <div class="stat col-3" id="s-load" data-tone="neutral">
@@ -1705,7 +1717,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <div class="stat col-3" id="s-audit" data-tone="neutral">
               <span class="stat-label label">Audit entries</span>
               <span class="stat-value" id="s-audit-v">·</span>
-              <span class="stat-sub"><span class="badge" data-tone="neutral" id="s-audit-chain">not yet checked</span></span>
+              <span class="stat-sub"><span class="badge" data-tone="neutral" id="s-audit-chain">Not yet checked</span></span>
             </div>
           </div>
 
@@ -1713,7 +1725,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <!-- The assurance ledger: the console's central argument. -->
             <div class="panel col-7">
               <div class="panel-head">
-                <span class="eyebrow">Assurance ledger</span>
+                <span class="eyebrow">Security claims</span>
                 <div class="panel-tools">
                   <span class="label" id="ledger-summary">·</span>
                 </div>
@@ -1727,8 +1739,8 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px;color:var(--text-3)">
                   <circle cx="8" cy="8" r="6"></circle><path d="M8 7.4v3.4M8 5.3v.1" stroke-linecap="round"></path>
                 </svg>
-                <span>A single indicator cannot express four independent facts. Each claim is verdicted on its own,
-                  and a claim nobody could check reads as unverified rather than as passing.</span>
+                <span>Each claim is checked on its own. One that can't be verified shows as unverified,
+                  not as passing.</span>
               </div>
             </div>
 
@@ -1811,10 +1823,10 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
                       <circle cx="3.4" cy="4.6" r="1.1"></circle><circle cx="3.4" cy="8" r="1.1"></circle><circle cx="3.4" cy="11.4" r="1.1"></circle>
                     </svg>
                   </span>
-                  <span class="empty-title">The log is not open</span>
-                  <span class="empty-text">Reading the audit log is itself an audited act, so the console does not
-                    poll it in the background. Open it deliberately.</span>
-                  <button class="btn btn--sm" data-goto="audit">Read the log</button>
+                  <span class="empty-title">Audit log not loaded</span>
+                  <span class="empty-text">Reading the log adds an entry to it, so it is loaded on request
+                    rather than in the background.</span>
+                  <button class="btn btn--sm" data-goto="audit">Load audit log</button>
                 </div>
               </div>
             </div>
@@ -1829,14 +1841,13 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
 
           <div class="page-head">
             <div class="page-head-text">
-              <span class="eyebrow">Assurance</span>
-              <h2 class="page-title">Challenge this node</h2>
-              <p class="page-desc">A report is evidence only if it commits to a value <strong>you</strong> chose.
-                This issues a fresh 128-bit nonce, asks for a report bound to it, and reports what that report does
-                and does not establish as four separate facts. It is the same request a client would make.</p>
+              <span class="eyebrow">Verify</span>
+              <h2 class="page-title">Attestation</h2>
+              <p class="page-desc">Requests a report bound to a fresh 128-bit nonce, the same request a client
+                makes, and shows what the report does and does not prove.</p>
             </div>
             <div class="page-actions">
-              <span class="label mono" id="a-nonce">no challenge issued</span>
+              <span class="label mono" id="a-nonce">No report yet</span>
               <button class="btn btn--primary" id="a-fetch">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M8 1.8 13 4v4.2c0 2.8-2.1 4.7-5 5.9-2.9-1.2-5-3.1-5-5.9V4Z"></path><path d="m5.9 8 1.5 1.5 2.9-2.9"></path>
@@ -1850,12 +1861,12 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
                 <circle cx="8" cy="8" r="6"></circle><path d="M8 7.4v3.4M8 5.3v.1" stroke-linecap="round"></path>
               </svg>
-              <span>No report has been requested in this session. Nothing below is asserted yet.</span>
+              <span>No report requested yet.</span>
             </p>
 
             <div class="grid">
               <div class="panel col-7">
-                <div class="panel-head"><span class="eyebrow">What this report establishes</span></div>
+                <div class="panel-head"><span class="eyebrow">What the report proves</span></div>
                 <div class="ledger" id="a-facts">
                   <div class="ledger-item" data-tone="neutral">
                     <span class="ledger-mark"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 4.6v4.2M8 11v.1"></path></svg></span>
@@ -1893,8 +1904,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
                     <div><dt>Nonce</dt><dd id="a-nonce-2">·</dd></div>
                   </dl>
                 </div>
-                <div class="panel-foot">These are the values to carry off the node. A truncated key is not a key, so
-                  copy takes the whole thing.</div>
+                <div class="panel-foot">Copy buttons copy the full value, not the shortened form.</div>
               </div>
             </div>
 
@@ -1910,16 +1920,15 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
                   </div>
                 </div>
                 <div class="panel-body stack">
-                  <p class="prose">Verification compares a report against values the operator pinned. A node with
-                    nothing pinned cannot be verified against anything, and says so rather than verifying trivially.
-                    Review these, then commit them to <code class="inline">cordon.toml</code>.</p>
+                  <p class="prose">Reports are verified against values you pin in advance. Review these, then
+                    add them to <code class="inline">cordon.toml</code>.</p>
                   <pre class="code" id="a-pin">Request a report to see the block.</pre>
                 </div>
               </div>
 
               <div class="panel col-6">
                 <div class="panel-head">
-                  <span class="eyebrow">The report, verbatim</span>
+                  <span class="eyebrow">Raw report</span>
                   <div class="panel-tools">
                     <button class="btn btn--sm btn--ghost" id="a-copy-raw" disabled>Copy JSON</button>
                   </div>
@@ -1935,16 +1944,15 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
       </section>
 
       <!-- ══ Audit ════════════════════════════════════════════════════════ -->
-      <section class="view" data-view="audit" aria-label="Audit chain">
+      <section class="view" data-view="audit" aria-label="Audit log">
         <div class="page">
 
           <div class="page-head">
             <div class="page-head-text">
-              <span class="eyebrow">Assurance</span>
-              <h2 class="page-title">Audit chain</h2>
-              <p class="page-desc">A hash-chained, signed, append-only log. It records hashes, token counts and
-                policy outcomes, never prompts or completions. Reading it is itself recorded, so this view will
-                show its own access.</p>
+              <span class="eyebrow">Verify</span>
+              <h2 class="page-title">Audit log</h2>
+              <p class="page-desc">Hash-chained, signed and append-only. It records hashes, token counts and
+                policy outcomes, never prompts or completions. Reading it is recorded too.</p>
             </div>
             <div class="page-actions">
               <button class="btn" id="d-refresh">
@@ -1952,11 +1960,11 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
                   <path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"></path><path d="M13.7 2.4v3.2h-3.2"></path>
                 </svg>Refresh
               </button>
-              <button class="btn" id="d-anchor">Take an anchor</button>
+              <button class="btn" id="d-anchor">Export anchor</button>
               <button class="btn btn--primary" id="d-verify">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M2.6 8.3 6 11.7l7.4-7.4"></path>
-                </svg>Verify the whole chain
+                </svg>Verify chain
               </button>
             </div>
           </div>
@@ -1965,19 +1973,19 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <div class="stat col-4" data-tone="neutral">
               <span class="stat-label label">Entries</span>
               <span class="stat-value" id="d-entries">·</span>
-              <span class="stat-sub">Sequence numbers are contiguous or the chain is broken.</span>
+              <span class="stat-sub">Sequence numbers must be contiguous.</span>
             </div>
             <div class="stat col-4" id="d-verdict-tile" data-tone="neutral">
               <span class="stat-label label">Chain state</span>
               <span class="stat-value" style="font-size:var(--fs-md);padding-top:var(--s1)">
-                <span class="badge" data-tone="neutral" id="d-verdict">not yet checked</span>
+                <span class="badge" data-tone="neutral" id="d-verdict">Not yet checked</span>
               </span>
               <span class="stat-sub" id="d-verdict-sub">Verification recomputes every hash and checks every signature.</span>
             </div>
             <div class="stat col-4" data-tone="neutral">
               <span class="stat-label label">Chain head</span>
               <span class="stat-value" style="font-size:var(--fs-sm);line-height:1.5;padding-top:var(--s1)" id="d-head">·</span>
-              <span class="stat-sub">Record this with a third party to make an earlier rewrite detectable.</span>
+              <span class="stat-sub">Share it with a third party to make later rewrites detectable.</span>
             </div>
           </div>
 
@@ -2044,8 +2052,8 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
               <div class="panel-body stack">
                 <p class="callout" data-tone="accent">
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"></circle><path d="M8 7.4v3.4M8 5.3v.1" stroke-linecap="round"></path></svg>
-                  <span>Record this somewhere this operator does not control. Any later rewrite of the log before
-                    that sequence then becomes detectable by a party who holds it.</span>
+                  <span>Store this somewhere the operator doesn't control. Whoever holds it can detect any
+                    rewrite of the log up to this entry.</span>
                 </p>
                 <pre class="code" id="d-anchor-out"></pre>
               </div>
@@ -2056,7 +2064,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
       </section>
 
       <!-- ══ Inference console ════════════════════════════════════════════ -->
-      <section class="view view--fill" data-view="console" aria-label="Inference console">
+      <section class="view view--fill" data-view="console" aria-label="Inference">
         <div class="console-shell">
           <div class="console-main">
 
@@ -2084,7 +2092,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
               </label>
               <span class="spacer"></span>
               <button class="btn btn--sm btn--ghost" id="c-inspect" hidden>Inspector</button>
-              <button class="btn btn--sm btn--ghost" id="c-clear">Clear transcript</button>
+              <button class="btn btn--sm btn--ghost" id="c-clear">Clear</button>
             </div>
 
             <div class="transcript" id="transcript">
@@ -2095,9 +2103,9 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
                       <path d="M2.5 3.5h11v7.2h-6L4.4 13V10.7H2.5Z"></path>
                     </svg>
                   </span>
-                  <span class="empty-title">Requests here traverse the full pipeline</span>
-                  <span class="empty-text">Identity, policy, rate limiting, output filtering and the audit log all
-                    apply. Nothing on this page bypasses any of it, and every request below is recorded.</span>
+                  <span class="empty-title">Send a message to the model</span>
+                  <span class="empty-text">Messages go through the full pipeline: identity, policy, rate limits,
+                    output filtering and the audit log.</span>
                 </div>
               </div>
             </div>
@@ -2105,7 +2113,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <div class="composer">
               <div class="composer-inner">
                 <div class="composer-box">
-                  <textarea id="prompt" rows="1" placeholder="Send a message through the pipeline…"></textarea>
+                  <textarea id="prompt" rows="1" placeholder="Message the model…"></textarea>
                   <button class="btn btn--primary" id="c-send" aria-label="Send">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M2.6 8h9.8M8.6 4.2 12.4 8l-3.8 3.8"></path>
@@ -2116,7 +2124,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
                   <span><kbd>Enter</kbd> send</span>
                   <span><kbd>Shift Enter</kbd> newline</span>
                   <span class="spacer"></span>
-                  <span id="c-session">no session</span>
+                  <span id="c-session">No session</span>
                 </div>
               </div>
             </div>
@@ -2134,8 +2142,8 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
             <div class="inspector-body" id="inspector-body">
               <div class="inspector-section">
                 <span class="label">Nothing sent yet</span>
-                <p class="prose" style="font-size:var(--fs-sm)">Token usage, finish reason, the content-policy
-                  outcome and the response signature will appear here after the first request.</p>
+                <p class="prose" style="font-size:var(--fs-sm)">Token usage, policy outcome and the signature of
+                  the last response appear here.</p>
               </div>
             </div>
           </aside>
@@ -2147,11 +2155,10 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
         <div class="page">
           <div class="page-head">
             <div class="page-head-text">
-              <span class="eyebrow">Operations</span>
+              <span class="eyebrow">Operate</span>
               <h2 class="page-title">Model store</h2>
-              <p class="page-desc">Encrypted bundles registered with this node, and the integrity state of each.
-                A bundle that fails its check stops being servable; recovery is refused while any bundle is
-                failing.</p>
+              <p class="page-desc">Encrypted model bundles registered with this node. A bundle that fails its
+                integrity check is taken out of service.</p>
             </div>
             <div class="page-actions">
               <button class="btn" id="m-refresh">
@@ -2192,12 +2199,12 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
       </section>
 
       <!-- ══ API surface ══════════════════════════════════════════════════ -->
-      <section class="view" data-view="api" aria-label="API surface">
+      <section class="view" data-view="api" aria-label="API reference">
         <div class="page">
           <div class="page-head">
             <div class="page-head-text">
               <span class="eyebrow">Reference</span>
-              <h2 class="page-title">API surface</h2>
+              <h2 class="page-title">API reference</h2>
               <p class="page-desc">Every route this node serves, and what authorises it. <code class="inline">client</code>
                 means a certificate the node has enrolled; <code class="inline">K_admin</code> means an Ed25519
                 signature under the CMK-derived admin key.</p>
@@ -2321,7 +2328,7 @@ select.input { cursor: pointer; padding-right: var(--s5); appearance: none; }
       <span class="spacer"></span>
       <span class="status-cell" id="f-sync">·</span>
       <span class="status-rule"></span>
-      <span class="status-cell">Loopback listener · no authentication of its own</span>
+      <span class="status-cell" id="f-surface">Local listener · no sign-in</span>
     </footer>
   </div><!-- /main -->
 </div><!-- /app -->
@@ -2410,6 +2417,12 @@ const bytes = (n) => {
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
 };
+
+/* Measurement sources and evidence kinds arrive as wire identifiers. */
+const sourceName = (value) => ({
+  software_measurement: 'Software', tpm2: 'TPM 2.0', sev_snp: 'SEV-SNP',
+  nitro_enclave: 'Nitro Enclave', none: 'None',
+}[value] ?? (value ? String(value).replace(/_/g, ' ') : 'Unknown'));
 
 const clockOf = (iso) => {
   if (!iso) return '·';
@@ -2548,7 +2561,7 @@ $('theme-btn').addEventListener('click', () => {
   const next = currentTheme() === 'dark' ? 'light' : 'dark';
   applyTheme(next);
   writeStored(THEME_KEY, next);
-  toast(`Switched to the ${next === 'dark' ? 'Ink' : 'Paper'} scheme`);
+  toast(next === 'dark' ? 'Dark theme' : 'Light theme');
 });
 
 /* -- Navigation -----------------------------------------------------------
@@ -2556,12 +2569,12 @@ $('theme-btn').addEventListener('click', () => {
    runbook, lands where the operator left off. */
 
 const VIEWS = {
-  overview:    { section: 'Posture',    title: 'Node posture' },
-  attestation: { section: 'Assurance',  title: 'Challenge this node' },
-  audit:       { section: 'Assurance',  title: 'Audit chain' },
-  console:     { section: 'Operations', title: 'Inference console' },
-  models:      { section: 'Operations', title: 'Model store' },
-  api:         { section: 'Reference',  title: 'API surface' },
+  overview:    { section: 'Monitor',   title: 'Overview' },
+  attestation: { section: 'Verify',    title: 'Attestation' },
+  audit:       { section: 'Verify',    title: 'Audit log' },
+  console:     { section: 'Operate',   title: 'Inference' },
+  models:      { section: 'Operate',   title: 'Model store' },
+  api:         { section: 'Reference', title: 'API reference' },
 };
 
 let currentView = 'overview';
@@ -2575,7 +2588,7 @@ function goto(view, { push = true } = {}) {
     if (v.dataset.view === view) v.setAttribute('data-active', '');
     else v.removeAttribute('data-active');
   });
-  $$('.nav-item').forEach((b) => {
+  $$('.nav-item[data-view]').forEach((b) => {
     if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
@@ -2604,7 +2617,7 @@ function goto(view, { push = true } = {}) {
   if (view === 'models') loadModels();
 }
 
-$$('.nav-item').forEach((b) => b.addEventListener('click', () => goto(b.dataset.view)));
+$$('.nav-item[data-view]').forEach((b) => b.addEventListener('click', () => goto(b.dataset.view)));
 $$('[data-goto]').forEach((b) => b.addEventListener('click', () => goto(b.dataset.goto)));
 addEventListener('hashchange', () => goto(location.hash.slice(1), { push: false }));
 
@@ -2675,23 +2688,23 @@ $('scrim').addEventListener('click', () => { closeRail(); closePalette(); });
    keyboard is the fast path for someone who already has it. */
 
 const COMMANDS = [
-  { group: 'Go to', label: 'Node posture',        hint: 'overview',    icon: 'chev',  run: () => goto('overview') },
+  { group: 'Go to', label: 'Overview',            hint: 'overview',    icon: 'chev',  run: () => goto('overview') },
   { group: 'Go to', label: 'Attestation',         hint: 'attestation', icon: 'chev',  run: () => goto('attestation') },
-  { group: 'Go to', label: 'Audit chain',         hint: 'audit',       icon: 'chev',  run: () => goto('audit') },
-  { group: 'Go to', label: 'Inference console',   hint: 'console',     icon: 'chev',  run: () => goto('console') },
+  { group: 'Go to', label: 'Audit log',           hint: 'audit',       icon: 'chev',  run: () => goto('audit') },
+  { group: 'Go to', label: 'Inference',           hint: 'console',     icon: 'chev',  run: () => goto('console') },
   { group: 'Go to', label: 'Model store',         hint: 'models',      icon: 'chev',  run: () => goto('models') },
-  { group: 'Go to', label: 'API surface',         hint: 'api',         icon: 'chev',  run: () => goto('api') },
+  { group: 'Go to', label: 'API reference',       hint: 'api',         icon: 'chev',  run: () => goto('api') },
 
   { group: 'Run',   label: 'Request an attestation report', icon: 'spark', run: () => { goto('attestation'); $('a-fetch').click(); } },
-  { group: 'Run',   label: 'Verify the whole audit chain',  icon: 'check', run: () => { goto('audit'); $('d-verify').click(); } },
-  { group: 'Run',   label: 'Take an audit anchor',          icon: 'spark', run: () => { goto('audit'); $('d-anchor').click(); } },
+  { group: 'Run',   label: 'Verify the audit log',          icon: 'check', run: () => { goto('audit'); $('d-verify').click(); } },
+  { group: 'Run',   label: 'Export an audit anchor',        icon: 'spark', run: () => { goto('audit'); $('d-anchor').click(); } },
   { group: 'Run',   label: 'Refresh node status',           icon: 'spark', run: () => refresh(true) },
 
   { group: 'Copy',  label: 'Copy the chain head',           icon: 'copy',  run: () => copyAnd(latest?.audit?.chain_head, 'Chain head copied') },
   { group: 'Copy',  label: 'Copy the log verifying key',    icon: 'copy',  run: () => copyAnd(latest?.audit?.log_verifying_key, 'Verifying key copied') },
   { group: 'Copy',  label: 'Copy the node measurement',     icon: 'copy',  run: () => copyAnd(latest?.trust?.mrenclave, 'Measurement copied') },
 
-  { group: 'View',  label: 'Switch colour scheme',          icon: 'spark', run: () => $('theme-btn').click() },
+  { group: 'View',  label: 'Toggle dark theme',             icon: 'spark', run: () => $('theme-btn').click() },
   { group: 'View',  label: 'Collapse or expand the sidebar', icon: 'spark', run: toggleRail },
 ];
 
@@ -2783,6 +2796,7 @@ addEventListener('keydown', (e) => {
 
 let latest = null;
 let lastOk = 0;
+let modelEdited = false;
 let failures = 0;
 let pollTimer = null;
 const lat50 = [], lat99 = [];
@@ -2807,8 +2821,8 @@ async function refresh(manual = false) {
     data = await res.json();
   } catch {
     failures += 1;
-    setConnection(failures > 2 ? 'offline' : 'stale', failures > 2 ? 'unreachable' : 'retrying');
-    setBadge($('top-state'), 'unreachable', 'stop');
+    setConnection(failures > 2 ? 'offline' : 'stale', failures > 2 ? 'Unreachable' : 'Retrying');
+    setBadge($('top-state'), 'Unreachable', 'stop');
     if (manual) toast('The node did not answer', 'stop');
     schedulePoll();
     return;
@@ -2817,7 +2831,7 @@ async function refresh(manual = false) {
   failures = 0;
   lastOk = Date.now();
   latest = data;
-  setConnection('live', 'live');
+  setConnection('live', 'Live');
   render(data);
   if (manual) toast('Status refreshed', 'ok');
   schedulePoll();
@@ -2835,7 +2849,7 @@ function render(d) {
   const status = d.status ?? 'unknown';
   const tone = stateTone(status);
 
-  setBadge($('top-state'), status, tone);
+  setBadge($('top-state'), status.charAt(0).toUpperCase() + status.slice(1), tone);
   $('s-state').dataset.tone = tone;
   setText($('s-state-v'), status);
   // Uptime moves on every poll by definition; flashing it would train the
@@ -2856,7 +2870,7 @@ function render(d) {
   /* Audit */
   setText($('s-audit-v'), num(d.audit?.entries_total ?? 0));
   const cv = d.audit?.chain_valid;
-  const chainText = cv === true ? 'intact' : cv === false ? 'broken' : 'not yet checked';
+  const chainText = cv === true ? 'Intact' : cv === false ? 'Broken' : 'Not yet checked';
   const chainTone = cv === true ? 'ok' : cv === false ? 'stop' : 'neutral';
   setBadge($('s-audit-chain'), chainText, chainTone);
   setBadge($('d-verdict'), chainText, chainTone);
@@ -2872,10 +2886,13 @@ function render(d) {
   /* Runtime */
   const ready = Boolean(d.runtime?.ready);
   const placeholder = Boolean(d.runtime?.is_placeholder);
-  setBadge($('o-runtime-badge'), placeholder ? 'placeholder' : ready ? 'reachable' : 'unreachable',
+  setBadge($('o-runtime-badge'), placeholder ? 'Placeholder' : ready ? 'Reachable' : 'Unreachable',
            placeholder ? 'warn' : ready ? 'ok' : 'stop');
   setText($('o-backend'), d.runtime?.backend);
   setText($('o-model'), d.runtime?.model ?? 'none');
+  if (!modelEdited && d.runtime?.model && $('c-model').value !== d.runtime.model) {
+    $('c-model').value = d.runtime.model;
+  }
   setText($('o-sessions'), num(d.runtime?.active_sessions ?? 0));
   const p50 = d.runtime?.latency_ms_p50 ?? 0, p99 = d.runtime?.latency_ms_p99 ?? 0;
   setText($('o-latency'), `${num(p50)} ms / ${num(p99)} ms`);
@@ -2888,7 +2905,7 @@ function render(d) {
   note.innerHTML = svg(placeholder ? 'alert' : 'info', 15);
   note.appendChild(el('span', null, placeholder
     ? 'No model runtime is attached. Responses are clearly-labelled placeholders, not generated text. Set runtime.backend = "supervised" to serve a model.'
-    : 'The runtime is bound to loopback on an ephemeral port with its own web UI unreachable. Cordon is the only network surface.'));
+    : 'llama.cpp runs on a private loopback port with its own web UI disabled. Cordon is the only way in.'));
 
   /* Ledger */
   renderLedger(d);
@@ -2910,18 +2927,21 @@ function render(d) {
    one carries its own verdict and its own consequence, in words. */
 function renderLedger(d) {
   const cmk = d.trust?.key_provenance === 'cmk_derived';
+  const localKey = d.trust?.key_provenance === 'local';
   const hw = Boolean(d.trust?.hardware_measurements);
   const pinned = Boolean(d.trust?.measurements_pinned);
   const cv = d.audit?.chain_valid;
 
   const claims = [
     {
-      claim: 'Signatures verify against a key the operator cannot forge',
-      tone: cmk ? 'ok' : 'stop',
+      claim: 'Signed with a key the operator cannot forge',
+      tone: cmk ? 'ok' : localKey ? 'warn' : 'stop',
       verdict: cmk
         ? 'Keys are derived from the Client Master Key. Any party holding it can check this node\'s signatures without trusting the node.'
-        : 'Signing keys were generated at boot, so the node self-certifies. Audit and response signatures carry no cross-party guarantee until a Client Master Key is provisioned.',
-      badge: cmk ? 'cmk-derived' : 'self-signed',
+        : localKey
+          ? 'Keys are kept on this machine, so signatures stay consistent across restarts, but only this machine vouches for them. Provision a Client Master Key to make them independently checkable.'
+          : 'Keys were generated at startup, so only this node vouches for its signatures. Provision a Client Master Key to make them independently checkable.',
+      badge: cmk ? 'CMK-derived' : localKey ? 'Local key' : 'Self-signed',
       goto: 'attestation',
     },
     {
@@ -2929,8 +2949,8 @@ function renderLedger(d) {
       tone: hw ? 'ok' : 'warn',
       verdict: hw
         ? `Measurements are taken from the platform (${d.trust?.measurement_source ?? 'hardware'}), not from this node's own description of itself.`
-        : 'Measurements are derived from this node\'s configuration. They attest that Cordon is running the expected configuration and nothing about the platform underneath it. An attacker with code execution here can reproduce them exactly.',
-      badge: d.trust?.measurement_source ?? 'unknown',
+        : 'Measurements describe this node\'s configuration, not the platform under it. Anyone with code execution on this host could reproduce them.',
+      badge: sourceName(d.trust?.measurement_source),
       goto: 'attestation',
     },
     {
@@ -2938,8 +2958,8 @@ function renderLedger(d) {
       tone: pinned ? 'ok' : 'stop',
       verdict: pinned
         ? 'A report can be checked against values the operator committed in advance.'
-        : 'Nothing is pinned, so a report cannot be verified against anything. Capture the measurements into [attestation.expected] and restart.',
-      badge: pinned ? 'pinned' : 'nothing pinned',
+        : 'No expected values are pinned, so reports cannot be checked. Copy the measurements into [attestation.expected] and restart.',
+      badge: pinned ? 'Pinned' : 'Nothing pinned',
       goto: 'attestation',
     },
     {
@@ -2949,8 +2969,8 @@ function renderLedger(d) {
         ? `${num(d.audit?.entries_total ?? 0)} entries hash-chained and signed, last check intact.`
         : cv === false
           ? 'The chain does not verify. Entries have been rewritten, deleted or renumbered since they were written.'
-          : 'The chain has not been checked in this process. Verification recomputes every hash and checks every signature.',
-      badge: cv === true ? 'intact' : cv === false ? 'broken' : 'unchecked',
+          : 'Not checked since this node started.',
+      badge: cv === true ? 'Intact' : cv === false ? 'Broken' : 'Unchecked',
       goto: 'audit',
     },
   ];
@@ -2967,8 +2987,8 @@ function renderLedger(d) {
     if (!first) reflash(assuranceValue);
   }
   setText($('s-assurance-sub'),
-    established === 4 ? 'Every claim below is independently checkable.'
-      : `${4 - established} claim${4 - established === 1 ? '' : 's'} a third party could not check.`);
+    established === 4 ? 'All claims independently verifiable'
+      : `${4 - established} not independently verifiable`);
   setText($('ledger-summary'), `${established} of 4 established`, { flash: false });
 
   const attTag = $('nav-att-tag');
@@ -3086,7 +3106,7 @@ function emptyBundles() {
   wrap.appendChild(mark);
   wrap.appendChild(el('span', 'empty-title', 'No encrypted bundles registered'));
   wrap.appendChild(el('span', 'empty-text',
-    'The runtime is serving a model file directly. Package one with cordon-provision to bring it under the store\'s integrity gate.'));
+    'The runtime serves a plain GGUF file. Package it with cordon-provision to add integrity checks.'));
   return wrap;
 }
 
@@ -3169,13 +3189,13 @@ function renderAttestation(body, nonce) {
   const pinned = Boolean(body.measurements_are_pinned);
 
   setFact(0, {
-    badgeText: source, tone: hardware ? 'ok' : 'warn',
+    badgeText: sourceName(source), tone: hardware ? 'ok' : 'warn',
     verdict: hardware
       ? 'Measurements are read from the platform, not from the node\'s own description of itself.'
       : 'A software measurement, derived from this node\'s configuration. Anyone with code execution on this host can reproduce it exactly.',
   });
   setFact(1, {
-    badgeText: confidential ? evidence.kind : tpmQuote ? 'tpm 2.0' : 'absent',
+    badgeText: confidential ? sourceName(evidence.kind) : tpmQuote ? 'TPM 2.0' : 'Absent',
     tone: confidential || tpmQuote ? 'ok' : 'warn',
     verdict: confidential
       ? 'A confidential-VM platform signed this report. Host memory is not readable by whoever runs the host.'
@@ -3184,16 +3204,16 @@ function renderAttestation(body, nonce) {
         : 'No platform signed for these measurements. The node is vouching for itself.',
   });
   setFact(2, {
-    badgeText: binds ? 'yes' : 'no', tone: binds ? 'ok' : 'warn',
+    badgeText: binds ? 'Yes' : 'No', tone: binds ? 'ok' : 'warn',
     verdict: binds
       ? 'The report declares the key that signs inference responses, so an attested environment and a signed response are the same environment.'
       : 'The report declares no response-signing key, so nothing connects this attestation to the signatures on inference responses.',
   });
   setFact(3, {
-    badgeText: pinned ? 'pinned' : 'nothing pinned', tone: pinned ? 'ok' : 'stop',
+    badgeText: pinned ? 'Pinned' : 'Nothing pinned', tone: pinned ? 'ok' : 'stop',
     verdict: pinned
       ? 'The operator committed expected values in advance, so this report can be checked against something.'
-      : 'Nothing is pinned. A node with no expected values cannot be verified against anything, and says so rather than verifying trivially.',
+      : 'No expected values are pinned, so there is nothing to check this report against.',
   });
 
   setCopyable($('a-mrenclave'), tee.mrenclave, shorten(tee.mrenclave, 14, 10));
@@ -3207,10 +3227,10 @@ function renderAttestation(body, nonce) {
   let tone, words;
   if (!pinned) {
     tone = 'stop';
-    words = 'Nothing is pinned, so this report cannot be verified against anything. Capture the values below into [attestation.expected] and restart.';
+    words = 'No expected values are pinned, so this report cannot be verified. Copy the block below into [attestation.expected] and restart.';
   } else if (!confidential && !tpmQuote) {
     tone = 'warn';
-    words = 'A software measurement. It attests that Cordon is running the configuration the operator expects, and nothing about the platform underneath it. An attacker with code execution on this host can reproduce it exactly.';
+    words = 'Software measurement only: it confirms the expected configuration, not the platform under it. Anyone with code execution on this host could reproduce it.';
   } else if (!binds) {
     tone = 'warn';
     words = 'The platform signed for these measurements, but the report declares no response-signing key, so nothing connects this attestation to the signatures on inference responses.';
@@ -3253,13 +3273,13 @@ $('a-fetch').addEventListener('click', async () => {
   try {
     const body = await jsonOf(await fetch(`/api/attestation?nonce=${encodeURIComponent(nonce)}`, asConsole));
     renderAttestation(body, nonce);
-    toast('Report received and bound to your nonce', 'ok');
+    toast('Report received', 'ok');
   } catch (e) {
     const verdict = $('a-verdict');
     verdict.dataset.tone = 'stop';
     verdict.innerHTML = svg('cross', 15);
     verdict.appendChild(el('span', null, String(e.message ?? e)));
-    toast('The node refused the challenge', 'stop');
+    toast('Attestation request failed', 'stop');
   } finally {
     button.removeAttribute('data-busy');
   }
@@ -3288,7 +3308,7 @@ async function loadEntries() {
   cell.colSpan = 5;
   cell.style.padding = '0';
   const sk = el('div', 'empty');
-  sk.appendChild(el('span', 'empty-title', 'Reading the log…'));
+  sk.appendChild(el('span', 'empty-title', 'Loading…'));
   cell.appendChild(sk);
   loading.appendChild(cell);
   body.appendChild(loading);
@@ -3397,7 +3417,7 @@ function drawEntries(errorText) {
   }
 
   setText($('d-foot'),
-    `Showing ${shown.length} of ${entries.length} read · newest last · the log records hashes, token counts and policy outcomes, never prompts or completions`,
+    `Showing ${shown.length} of ${entries.length} · newest last`,
     { flash: false });
 }
 
@@ -3454,12 +3474,14 @@ $('d-verify').addEventListener('click', async () => {
   setText($('d-verdict-sub'), 'Recomputing every hash and checking every signature…', { flash: false });
   try {
     const data = await jsonOf(await fetch('/api/audit/verify', asConsole));
-    setBadge($('d-verdict'), data.valid ? 'intact' : 'broken', data.valid ? 'ok' : 'stop');
+    setBadge($('d-verdict'), data.valid ? 'Intact' : 'Broken', data.valid ? 'ok' : 'stop');
     $('d-verdict-tile').dataset.tone = data.valid ? 'ok' : 'stop';
     setText($('d-verdict-sub'), data.valid
       ? `${num(data.entries_verified)} entries verified against ${data.key_provenance === 'cmk_derived'
           ? 'a key derived from the Client Master Key.'
-          : 'a key this node generated for itself, which proves only that the node agrees with itself.'}`
+          : data.key_provenance === 'local'
+            ? 'a key stored on this machine, which cannot be checked independently.'
+            : 'a key this node generated at startup, which cannot be checked independently.'}`
       : `The chain does not verify: ${(data.violations ?? []).slice(0, 3).join(' · ')}`,
       { flash: false });
     toast(data.valid ? 'Chain verified intact' : 'Chain verification failed', data.valid ? 'ok' : 'stop');
@@ -3476,16 +3498,16 @@ $('d-anchor').addEventListener('click', async () => {
   const button = $('d-anchor');
   button.setAttribute('data-busy', '');
   $('d-anchor-wrap').hidden = false;
-  $('d-anchor-out').textContent = 'Taking an anchor…';
+  $('d-anchor-out').textContent = 'Exporting…';
   try {
     const data = await jsonOf(await fetch('/api/audit/anchor', asConsole));
     anchorText = JSON.stringify(data, null, 2);
     $('d-anchor-out').textContent = anchorText;
-    toast(`Anchor taken at sequence ${data.sequence}`, 'ok');
+    toast(`Anchor exported at entry ${data.sequence}`, 'ok');
   } catch (e) {
     anchorText = null;
     $('d-anchor-out').textContent = String(e.message ?? e);
-    toast('Could not take an anchor', 'stop');
+    toast('Could not export an anchor', 'stop');
   } finally {
     button.removeAttribute('data-busy');
   }
@@ -3630,7 +3652,7 @@ function renderInspector(info) {
   ]));
 
   const policyBadge = badge(
-    info.policyTriggered ? 'triggered' : 'clear',
+    info.policyTriggered ? 'Triggered' : 'Clear',
     info.policyTriggered ? 'warn' : 'ok');
   host.appendChild(section('Content policy', [
     ['Outcome', policyBadge],
@@ -3645,8 +3667,10 @@ function renderInspector(info) {
 
   const foot = el('div', 'inspector-section');
   foot.appendChild(el('p', 'prose', info.provenance === 'cmk_derived'
-    ? 'This signature is checkable by any party holding the Client Master Key, without trusting this node.'
-    : 'This node signed with a key it generated for itself. The signature proves only that the node agrees with itself.'));
+    ? 'Anyone holding the Client Master Key can check this signature.'
+    : info.provenance === 'local'
+      ? 'Signed with a key stored on this machine; it cannot be checked independently.'
+      : 'Signed with a key this node generated at startup; it cannot be checked independently.'));
   foot.querySelector('.prose').style.fontSize = 'var(--fs-sm)';
   host.appendChild(foot);
 }
@@ -3680,10 +3704,10 @@ async function send() {
   promptBox.style.height = 'auto';
 
   history.push({ role: 'user', content: text });
-  addTurn('you', 'user').body.textContent = text;
+  addTurn('You', 'user').body.textContent = text;
 
   const streaming = $('c-stream').checked;
-  const out = addTurn('cordon', 'assistant');
+  const out = addTurn('Model', 'assistant');
   out.body.classList.add('caret');
 
   try {
@@ -3691,9 +3715,9 @@ async function send() {
     else await unaryReply(out);
   } catch (e) {
     out.turn.className = 'turn turn--error';
-    out.label.textContent = 'refused';
+    out.label.textContent = 'Refused';
     out.body.textContent = String(e.message ?? e);
-    toast('The pipeline refused the request', 'stop');
+    toast('Request refused', 'stop');
   } finally {
     out.body.classList.remove('caret');
     busy = false;
@@ -3734,7 +3758,7 @@ async function unaryReply(out) {
     provenance: data.signature?.key_provenance,
     session: sessionId,
   });
-  setText($('c-session'), sessionId ? `session ${shorten(sessionId, 8, 4)}` : 'no session', { flash: false });
+  setText($('c-session'), sessionId ? `Session ${shorten(sessionId, 8, 4)}` : 'No session', { flash: false });
 }
 
 /* SSE over POST needs a manual reader: EventSource cannot send a body. */
@@ -3805,7 +3829,7 @@ async function streamReply(out) {
       provenance: done.signature?.key_provenance,
       session: sessionId,
     });
-    setText($('c-session'), sessionId ? `session ${shorten(sessionId, 8, 4)}` : 'no session', { flash: false });
+    setText($('c-session'), sessionId ? `Session ${shorten(sessionId, 8, 4)}` : 'No session', { flash: false });
   }
 }
 
@@ -3827,11 +3851,10 @@ $('c-clear').addEventListener('click', () => {
   const empty = el('div', 'empty');
   empty.id = 'c-empty';
   empty.appendChild(el('span', 'empty-title', 'Transcript cleared'));
-  empty.appendChild(el('span', 'empty-text',
-    'The audit log is not. Every request sent above is recorded, and clearing a view on this machine does not unrecord it.'));
+  empty.appendChild(el('span', 'empty-text', 'The audit log still records every request sent.'));
   thread.appendChild(empty);
-  setText($('c-session'), 'no session', { flash: false });
-  toast('Transcript cleared; the audit log is unchanged');
+  setText($('c-session'), 'No session', { flash: false });
+  toast('Transcript cleared');
 });
 
 /* The inspector folds into a sheet below the transcript on narrow screens. */
@@ -3848,16 +3871,53 @@ narrow.addEventListener('change', syncInspector);
 syncInspector();
 
 /* ===========================================================================
+   Desktop shell
+
+   Inside the desktop app, runtime settings (model, GPU offload, context) are
+   the app's to change, not this page's: the app owns the node's lifecycle.
+   The page asks for them by navigating to a path the app intercepts, so no
+   address of the app itself is written into a page every browser can load.
+   ========================================================================= */
+
+const DESKTOP = document.documentElement.dataset.shell === 'desktop';
+const openRuntimeSettings = () => { location.href = '/desktop/settings'; };
+
+$('c-model').addEventListener('input', () => { modelEdited = true; });
+
+if (DESKTOP) {
+  $('nav-runtime').hidden = false;
+  $('nav-runtime').addEventListener('click', openRuntimeSettings);
+  COMMANDS.splice(6, 0, { group: 'Go to', label: 'Runtime settings', hint: 'settings', icon: 'chev', run: openRuntimeSettings });
+  setText($('f-surface'), 'Local only', { flash: false });
+
+  addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); openRuntimeSettings(); }
+    // Reloading would drop the transcript and gains nothing: the page polls.
+    if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r')) e.preventDefault();
+  });
+
+  // The browser's own menu (back, reload, save page, print) belongs to a web
+  // page. An application keeps it for text an operator can act on.
+  addEventListener('contextmenu', (e) => {
+    const target = e.target instanceof Element ? e.target : null;
+    const editable = target?.closest('input, textarea');
+    const selected = String(getSelection() ?? '').length > 0;
+    if (!editable && !selected) e.preventDefault();
+  });
+  syncRail();
+}
+
+/* ===========================================================================
    Boot
    ========================================================================= */
 
 /* A relative clock on the last successful poll. "12s ago" answers a question
    a timestamp does not: is this page still talking to the node? */
 setInterval(() => {
-  if (!lastOk) { setText($('f-sync'), 'never synced', { flash: false }); return; }
+  if (!lastOk) { setText($('f-sync'), 'Not synced', { flash: false }); return; }
   const age = Math.round((Date.now() - lastOk) / 1000);
-  setText($('f-sync'), `synced ${age < 2 ? 'just now' : `${age}s ago`}`, { flash: false });
-  if (age > 20 && failures === 0) setConnection('stale', 'stale');
+  setText($('f-sync'), `Synced ${age < 2 ? 'just now' : `${age}s ago`}`, { flash: false });
+  if (age > 20 && failures === 0) setConnection('stale', 'Stale');
 }, 1000);
 
 goto(location.hash.slice(1) || 'overview', { push: false });

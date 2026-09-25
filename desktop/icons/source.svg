@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- The Cordon mark on an ink tile: one line enters through the single break
+       in the perimeter and closes around the core. Same geometry as the
+       console's brand mark (32-unit grid), scaled by 20 and centred. -->
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="#1B1C19"/>
+  <g transform="translate(192 192) scale(20)">
+    <path d="M4 22V4H28V28H11V11H21V21" fill="none" stroke="#F2F0E9"
+          stroke-width="2.6" stroke-linecap="square" stroke-linejoin="miter"/>
+    <rect x="13.8" y="13.8" width="4.4" height="4.4" fill="#7FB894"/>
+  </g>
+</svg>

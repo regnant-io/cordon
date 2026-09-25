@@ -13,7 +13,7 @@ use cordon_api::{
     tls::{TlsConfig, TlsMode},
 };
 use cordon_core::{
-    config::{CordonConfig, DeploymentMode, RuntimeBackend},
+    config::{CordonConfig, DeploymentMode, GpuLayers, RuntimeBackend},
     hub,
     node::CordonNode,
     runtime::discover_llama_server,
@@ -81,9 +81,10 @@ enum Command {
         /// Directory for audit logs and bundles.
         #[arg(long, default_value = "./data")]
         data_dir: PathBuf,
-        /// Layers to offload to the GPU.
-        #[arg(long, default_value_t = 0)]
-        gpu_layers: u32,
+        /// Layers to offload to the GPU: a count, `auto` to fit as many as
+        /// free device memory allows, or `all`.
+        #[arg(long, default_value = "0")]
+        gpu_layers: GpuLayers,
         /// Context window size.
         #[arg(long, default_value_t = 4096)]
         ctx_size: u32,
@@ -407,7 +408,7 @@ fn build_run_config(
     model: &str,
     model_dir: &std::path::Path,
     data_dir: &std::path::Path,
-    gpu_layers: u32,
+    gpu_layers: GpuLayers,
     ctx_size: u32,
     ui: bool,
     ui_port: u16,
@@ -461,6 +462,9 @@ fn build_run_config(
 
     config.audit.log_path = data_dir.join("audit");
     config.model_store.path = data_dir.join("bundles");
+    // Signing keys that survive a restart, so the audit chain in this data
+    // directory keeps verifying. Ignored when a Client Master Key is supplied.
+    config.local_key_path = Some(data_dir.join("node.key"));
     config.runtime.backend = RuntimeBackend::Supervised;
     config.runtime.model_path = Some(model_path);
     config.runtime.model_dir = model_dir.to_path_buf();

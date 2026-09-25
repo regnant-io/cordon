@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 pub use deterministic::DeterministicBackend;
 pub use openai::{is_loopback_url, OpenAiBackend};
-pub use supervisor::{discover_llama_server, LlamaRuntimeConfig, LlamaSupervisor};
+pub use supervisor::{
+    discover_llama_server, LlamaRuntimeConfig, LlamaSupervisor, LLAMA_SERVER_EXE,
+};
 
 use crate::config::{CordonConfig, DeploymentMode, RuntimeBackend};
 use crate::error::{CordonError, CordonResult};

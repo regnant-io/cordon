@@ -346,6 +346,77 @@ pub enum RuntimeBackend {
     None,
 }
 
+/// How many model layers the runtime offloads to a GPU.
+///
+/// Written in configuration as a number or as one of the words `"auto"` and
+/// `"all"`, which is also how llama.cpp spells them on its command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuLayers {
+    /// Offload exactly this many layers. Zero keeps the model on the CPU.
+    Count(u32),
+    /// Let the runtime offload as many layers as free device memory allows.
+    Auto,
+    /// Offload every layer.
+    All,
+}
+
+impl Default for GpuLayers {
+    fn default() -> Self {
+        GpuLayers::Count(0)
+    }
+}
+
+impl std::fmt::Display for GpuLayers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GpuLayers::Count(n) => write!(f, "{}", n),
+            GpuLayers::Auto => f.write_str("auto"),
+            GpuLayers::All => f.write_str("all"),
+        }
+    }
+}
+
+impl std::str::FromStr for GpuLayers {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(GpuLayers::Auto),
+            "all" => Ok(GpuLayers::All),
+            other => other.parse::<u32>().map(GpuLayers::Count).map_err(|_| {
+                format!(
+                    "'{}' is not a layer count; use a number, \"auto\", or \"all\"",
+                    s
+                )
+            }),
+        }
+    }
+}
+
+impl Serialize for GpuLayers {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            GpuLayers::Count(n) => serializer.serialize_u32(*n),
+            other => serializer.serialize_str(&other.to_string()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GpuLayers {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Count(u32),
+            Word(String),
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Count(n) => Ok(GpuLayers::Count(n)),
+            Repr::Word(word) => word.parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 /// Model runtime configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
@@ -366,8 +437,10 @@ pub struct RuntimeConfig {
     pub endpoint_api_key_env: Option<String>,
     /// Context window passed to the runtime.
     pub context_size: u32,
-    /// Layers to offload to the GPU. Zero keeps the model on the CPU.
-    pub gpu_layers: u32,
+    /// Layers to offload to the GPU: a count, `"auto"` to let llama.cpp fit
+    /// as many as free device memory allows, or `"all"`. Zero keeps the model
+    /// on the CPU.
+    pub gpu_layers: GpuLayers,
     /// Generation threads. `None` lets the runtime choose.
     pub threads: Option<u32>,
     /// Parallel decode slots. Raised to Cordon's concurrency limit if lower.
@@ -388,7 +461,7 @@ impl Default for RuntimeConfig {
             endpoint_url: None,
             endpoint_api_key_env: None,
             context_size: 4096,
-            gpu_layers: 0,
+            gpu_layers: GpuLayers::Count(0),
             threads: None,
             parallel_slots: 4,
             startup_timeout_seconds: 180,
@@ -754,6 +827,16 @@ pub struct CordonConfig {
     /// Path to the client authorization registry (a JSON array of ClientPolicy)
     #[serde(default)]
     pub client_registry_path: Option<PathBuf>,
+    /// A signing-key seed kept on this machine, used when no Client Master Key
+    /// is provisioned. Light mode only; created on first start if absent.
+    ///
+    /// Without it a node with no CMK generates fresh signing keys at every
+    /// boot, so each restart makes every earlier audit entry fail
+    /// verification and the chain reads as broken. With it the chain verifies
+    /// end to end across restarts. The signatures are still only this
+    /// machine's word: whoever can read the file can sign as the node.
+    #[serde(default)]
+    pub local_key_path: Option<PathBuf>,
     /// Log level (trace/debug/info/warn/error)
     pub log_level: String,
 }
@@ -823,6 +906,7 @@ impl CordonConfig {
             limits: LimitsConfig::default(),
             content_policy: ContentPolicyConfig::default(),
             client_registry_path: None,
+            local_key_path: None,
             log_level: "info".to_string(),
         }
     }
@@ -836,6 +920,15 @@ impl CordonConfig {
     /// refuses to boot: operators believe the stronger claim either way.
     pub fn validate(&self) -> CordonResult<()> {
         let is_light = self.mode == DeploymentMode::Light;
+
+        if !is_light && self.local_key_path.is_some() {
+            return Err(CordonError::ConfigError(format!(
+                "local_key_path is set, but the node is in {} mode. A key kept on the \
+                 node is one the operator can read, so it cannot stand in for a Client \
+                 Master Key. Remove it and provision a CMK.",
+                self.mode
+            )));
+        }
 
         if self.deployment_id.trim().is_empty() {
             return Err(CordonError::ConfigError(
@@ -1535,6 +1628,29 @@ mod tests {
         assert_eq!(parsed.runtime.backend, original.runtime.backend);
         assert_eq!(parsed.ui.enabled, original.ui.enabled);
         assert!(parsed.validate().is_ok());
+    }
+
+    /// Existing configurations write `gpu_layers = 0`; that must keep parsing,
+    /// and the words llama.cpp itself accepts must parse alongside it.
+    #[test]
+    fn gpu_layers_accepts_a_count_or_a_word() {
+        #[derive(Deserialize, Serialize)]
+        struct Wrap {
+            gpu_layers: GpuLayers,
+        }
+        for (text, expected) in [
+            ("gpu_layers = 0", GpuLayers::Count(0)),
+            ("gpu_layers = 33", GpuLayers::Count(33)),
+            ("gpu_layers = \"auto\"", GpuLayers::Auto),
+            ("gpu_layers = \"ALL\"", GpuLayers::All),
+        ] {
+            let parsed: Wrap = toml::from_str(text).unwrap();
+            assert_eq!(parsed.gpu_layers, expected, "for {}", text);
+            let again: Wrap = toml::from_str(&toml::to_string(&parsed).unwrap()).unwrap();
+            assert_eq!(again.gpu_layers, expected, "round trip of {}", text);
+        }
+        assert!(toml::from_str::<Wrap>("gpu_layers = \"most\"").is_err());
+        assert!(toml::from_str::<Wrap>("gpu_layers = -1").is_err());
     }
 
     #[test]
