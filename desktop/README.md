@@ -10,23 +10,43 @@ README. This file is about building it.
 | Path | What it is |
 |---|---|
 | `src-tauri/` | The application: a [Tauri 2](https://tauri.app) shell around `cordon-core` and `cordon-api`. |
-| `src-tauri/src/engine.rs` | Starts, stops and restarts the node in-process. |
+| `src-tauri/src/engine.rs` | Builds the node's configuration for any mode and starts, stops and restarts it in-process. |
+| `src-tauri/src/posture.rs` | Deployment modes, and what each needs on this machine. |
+| `src-tauri/src/keys.rs` | The Client Master Key the app keeps. |
+| `src-tauri/src/bundles.rs` | The bundle store, and sealing, verifying, importing and exporting as background jobs. |
+| `src-tauri/src/remote.rs` | Remote access: the CA, issued clients, revocation, and the client registry the node enforces. |
+| `src-tauri/src/cli.rs` | Putting the bundled `cordon` on `PATH`, and taking it off again. |
 | `src-tauri/src/models.rs` | The first-run model list, local models, Hugging Face downloads. |
-| `shell/` | The launcher: first run, startup progress, settings. Static HTML, no build step. |
+| `src-tauri/capabilities/` | What each origin in the window may do. See below. |
+| `src-tauri/windows/hooks.nsh` | Uninstaller hook that takes `cordon` off `PATH`. |
+| `shell/` | The app's pages. Static HTML, no build step. |
+| `scripts/stage-cli.mjs` | Builds `cordon` and stages it in `src-tauri/bin` before every installer build. |
 | `src-tauri/llama/` | The bundled llama.cpp, filled by `scripts/fetch-llama`. Not committed. |
 | `icons/source.svg` | The app icon; `npm run icons` regenerates `src-tauri/icons/`. |
 
-The operator console is not duplicated here. Once the node is running, the
-window loads it from the node (`http://127.0.0.1:8478/?shell=desktop`), which
-is the same page `cordon run` serves to a browser. `?shell=desktop` only
-changes window chrome: no text selection on controls, no browser context menu,
-and a **Runtime settings** entry that returns to the launcher.
+The operator console is not duplicated here. While a Light-mode node runs, the
+window loads it from the node (`http://127.0.0.1:8478/?shell=desktop`), the
+same page `cordon run` serves to a browser. `?shell=desktop` changes chrome
+only: the page draws the app's title bar and window controls, and its sidebar
+adds the app's pages, which it reaches by navigating to `/desktop/<page>`. The
+window's navigation guard turns those into navigations back to the app, and
+`/desktop/stop` into stopping the node. Every other off-app link opens in the
+system browser, so nothing a model writes into a transcript can take over the
+window. Outside Light mode the node serves no console, and the app's own
+Overview reads the node's state in-process instead.
 
-The console cannot call into the app. It is served from a loopback origin no
-Tauri capability names, so it has exactly the reach it has in a browser. It
-asks for the launcher by navigating to `/desktop/settings`, which the window's
-navigation guard intercepts. Every other off-app link opens in the system
-browser.
+The window has no system title bar on Windows and Linux, and an overlay title
+bar on macOS; the pages draw it.
+
+### What each origin may do
+
+`capabilities/default.json` grants the app's own pages (the `tauri://` or
+`tauri.localhost` origin) the app's commands and the window controls.
+`capabilities/console.json` grants the console's loopback origin moving,
+sizing, minimising, maximising and closing the window, and nothing else. Tauri
+refuses app commands from a remote origin unless a capability names them, and
+none does, so a page the node serves has no more reach into the app than it
+would in a browser, plus the ability to move the window it is in.
 
 ## Building
 
@@ -49,6 +69,11 @@ cd desktop
 npm ci
 npx tauri build
 ```
+
+`tauri build` first runs `scripts/stage-cli.mjs`, which builds the `cordon`
+command line in release mode and copies it into `src-tauri/bin`, from where the
+installer ships it. It lands in a `bin` folder beside the app rather than next
+to it because `cordon.exe` and `Cordon.exe` are the same file on Windows.
 
 Installers land in `target/release/bundle/`: `nsis/*.exe` and `msi/*.msi` on
 Windows, `dmg/*.dmg` on macOS, `deb/`, `rpm/` and `appimage/` on Linux.

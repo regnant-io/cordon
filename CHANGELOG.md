@@ -4,6 +4,84 @@ All notable changes to Cordon are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-09-27
+
+The desktop app grows from a Light-mode launcher into the whole product:
+every deployment mode, sealed bundles, the key that seals them, and remote
+access, in a redesigned window that shares one design with the console.
+
+### Desktop app
+
+- **Deployment modes.** Settings choose Light, Sovereign Cloud, Vault, Island
+  or Dark. Each mode past Light lists what it needs (a Client Master Key, a
+  sealed model, mutual TLS, a hardware root of trust with pinned measurements,
+  no egress, and for Dark a FIPS 140-2 Level 4 custody declaration), marks what
+  this machine has, sets up what it can, and switches only when all are met.
+  The node's configuration mirrors `cordon default-config` for the mode, so
+  the desktop claims nothing a server node would not. Outside Light mode, where
+  the node refuses to serve a console, the app's Overview reads the node
+  in-process.
+- **Sealed bundles.** One click seals a model under the app's key into the
+  node's store or a folder for another node, with progress and cancel.
+  Bundles can be verified (every shard decrypted), served, exported, imported
+  and deleted. Serving one uses the Client Master Key and keeps its own audit
+  log, since a chain verifies against one signing key.
+- **Keys.** Create, import, back up or remove the Client Master Key. It stays
+  in the data folder and is never shown.
+- **Remote access** over mutual TLS only: a private CA, TLS 1.3, a client
+  certificate on every connection, certificates pinned by fingerprint in a
+  deny-by-default registry, revocation that restarts the node to apply, and
+  the console kept on loopback. Issuing a certificate writes the client's
+  files and a README to a folder of the operator's choosing.
+- **The `cordon` command line ships with the app**, in a `bin` folder beside
+  llama.cpp, and Settings can put it on `PATH`; the uninstaller takes it off.
+- **Redesign.** A neutral palette with one accent, the system UI font, a
+  custom title bar with window controls, and the page on an inset panel. The
+  console uses the same tokens and frame, and inside the app draws the same
+  title bar and sidebar, so the app's pages and the console read as one
+  window. The console's colour caps on stat tiles, striped callouts and
+  bordered pills are gone; verdicts are a dot and a word.
+
+### Command line
+
+- `cordon bundle seal|verify|inspect`, `cordon keys …`, `cordon verify-log`
+  and `cordon pki init|issue` make `cordon` the one tool. The separate
+  binaries remain.
+- `cordon bundle seal` needs only `--weights` and `--cmk-file`; the name,
+  bundle ID, principal and output folder have defaults, and a progress bar
+  shows the work. A failed or cancelled seal removes what it wrote.
+- `cordon pki` runs a private CA: a server certificate for this machine's
+  names and any given, and client certificates whose CN is the client ID.
+
+### Added
+
+- `cmk_path` and `key_principal` in the configuration, the file equivalents of
+  `CORDON_CMK_FILE` and `CORDON_CLIENT_ID`, taking precedence over them. A
+  configured key file that cannot be read stops the node.
+- `cordon_core::bundle`, the sealing and verification library behind the CLI
+  and the app, and `cordon_api::pki`.
+
+### Fixed
+
+- **A bundle ID could steer decrypted weights out of the staging directory.**
+  The ID names the staging file, and a manifest's `bundle_id` was not checked
+  for separators or `..`. Manifests with anything but letters, digits, `.`,
+  `-` and `_` in the ID are now refused.
+- **Any bundle in the store broke a node serving a plain model file.** The
+  model-store gate looked the client's `model_id` up in the store whenever it
+  held a bundle, so sealing one model refused every request to a node serving
+  another. The gate now checks the bundle the runtime actually loaded, and
+  `"default"` names it; a node serving a plain file is not gated on a store it
+  does not use.
+- **No sealed bundle could be served with the bundled llama.cpp.** The node
+  asked for a non-mapped load with `--no-mmap`, which llama.cpp replaced with
+  `--load-mode`, so the runtime refused to start. The supervisor now probes
+  for either flag, and refuses to serve a bundle through a runtime that has
+  neither, since a mapped file would keep decrypted weights on disk.
+- The console named a bundle-serving node's model by its staging file rather
+  than its bundle ID, so its own requests were refused by the gate.
+- The doc comment for the CMK loader sat on the local-seed loader.
+
 ## [Unreleased]
 
 The theme of this release is the distance between what the configuration and the

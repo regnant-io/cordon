@@ -449,6 +449,14 @@ pub struct RuntimeConfig {
     pub startup_timeout_seconds: u64,
     /// Additional arguments appended to the runtime command line verbatim.
     pub extra_args: Vec<String>,
+    /// Read the whole model into the runtime's memory instead of
+    /// memory-mapping the file.
+    ///
+    /// Set by the node when it serves a sealed bundle: the decrypted file is
+    /// erased as soon as the runtime has loaded it, which a mapping would keep
+    /// open (and which Windows refuses outright for a mapped file).
+    #[serde(default)]
+    pub no_mmap: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -466,6 +474,7 @@ impl Default for RuntimeConfig {
             parallel_slots: 4,
             startup_timeout_seconds: 180,
             extra_args: Vec::new(),
+            no_mmap: false,
         }
     }
 }
@@ -837,6 +846,19 @@ pub struct CordonConfig {
     /// machine's word: whoever can read the file can sign as the node.
     #[serde(default)]
     pub local_key_path: Option<PathBuf>,
+    /// A file holding the Client Master Key, hex.
+    ///
+    /// The configuration-file equivalent of `CORDON_CMK_FILE`, which it takes
+    /// precedence over. Keep the file on a memory-backed filesystem or behind
+    /// an HSM export where the deployment allows it; whoever can read it holds
+    /// every key the node derives.
+    #[serde(default)]
+    pub cmk_path: Option<PathBuf>,
+    /// The key-derivation principal: the client the CMK was issued to. The
+    /// configuration-file equivalent of `CORDON_CLIENT_ID`, which it takes
+    /// precedence over. Defaults to `operator`.
+    #[serde(default)]
+    pub key_principal: Option<String>,
     /// Log level (trace/debug/info/warn/error)
     pub log_level: String,
 }
@@ -907,6 +929,8 @@ impl CordonConfig {
             content_policy: ContentPolicyConfig::default(),
             client_registry_path: None,
             local_key_path: None,
+            cmk_path: None,
+            key_principal: None,
             log_level: "info".to_string(),
         }
     }

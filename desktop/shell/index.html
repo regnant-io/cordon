@@ -9,224 +9,311 @@
 <script src="app.js" defer></script>
 </head>
 <body>
-<div class="app">
 
-  <header class="bar">
-    <span class="brand">
-      <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
-        <path d="M4 22V4H28V28H11V11H21V21" stroke="currentColor" stroke-width="2.4"
-              stroke-linecap="square" stroke-linejoin="miter"></path>
-        <rect class="brand-core" x="13.9" y="13.9" width="4.2" height="4.2"></rect>
-      </svg>
-      Cordon
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-home" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 21l1.9-5.4A8 8 0 1 1 21 12z"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.4-3.4 8.2-8 9-4.6-.8-8-4.6-8-9V6l8-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16"/></symbol>
+  <symbol id="i-cube" viewBox="0 0 24 24"><path d="M12 2.8l8.5 4.7v9L12 21.2l-8.5-4.7v-9L12 2.8z"/><path d="M3.8 7.6L12 12l8.2-4.4M12 12v9"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10.5" width="16" height="10.5" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/><path d="M12 14.5v2.5"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="M11.2 11.8L20 3M16.5 6.5L19 9M14 9l2 2"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 17l9 5 9-5"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5-12-7.5z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M4.5 20h15"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V5M7 9.5l5-5 5 5M4.5 20h15"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5l9.5 16.5h-19L12 3.5z"/><path d="M12 10v4.5M12 17.5h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8h.01"/></symbol>
+  <symbol id="i-dash" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16M20 20v-4h-4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M5.5 7l1 12.5a2 2 0 0 0 2 1.5h7a2 2 0 0 0 2-1.5l1-12.5M9 7V4.5h6V7"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></symbol>
+  <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 10h4v4h-4zM9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol>
+  <symbol id="w-min" viewBox="0 0 10 10"><path d="M0 5.5h10"/></symbol>
+  <symbol id="w-max" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></symbol>
+  <symbol id="w-restore" viewBox="0 0 10 10"><rect x=".5" y="2.5" width="7" height="7"/><path d="M2.5 2.5v-2h7v7h-2"/></symbol>
+  <symbol id="w-close" viewBox="0 0 10 10"><path d="M.5.5l9 9M9.5.5l-9 9"/></symbol>
+</svg>
+
+<div class="app" id="app">
+
+  <header class="titlebar" data-tauri-drag-region>
+    <span class="brand"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 22V4H28V28H11V11H21V21" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"/><rect class="mark-core" x="13.8" y="13.8" width="4.4" height="4.4"/></svg>Cordon</span>
+    <span class="tb-status"><span class="dot" id="tb-dot"></span><span class="trunc" id="tb-text">Starting up</span></span>
+    <span class="tb-actions" data-tauri-drag-region>
+      <button class="btn btn--sm" id="tb-primary" hidden></button>
     </span>
-    <span class="spacer"></span>
-    <span class="chip" id="status-chip">Starting up</span>
-    <button class="btn btn--sm btn--ghost" id="bar-settings" hidden>Settings</button>
-    <button class="btn btn--sm" id="bar-console" hidden>Open console</button>
+    <div class="wc" id="wc">
+      <button id="wc-min" aria-label="Minimise"><svg><use href="#w-min"/></svg></button>
+      <button id="wc-max" aria-label="Maximise"><svg><use href="#w-max"/></svg></button>
+      <button class="wc-close" id="wc-close" aria-label="Close"><svg><use href="#w-close"/></svg></button>
+    </div>
   </header>
 
-  <main class="scroll" id="main">
+  <aside class="sidebar" id="sidebar">
+    <nav class="nav" aria-label="Node">
+      <button class="nav-item" data-go="home"><svg class="ico"><use href="#i-home"/></svg>Overview</button>
+      <button class="nav-item" data-console="console"><svg class="ico"><use href="#i-chat"/></svg>Inference</button>
+      <button class="nav-item" data-console="audit"><svg class="ico"><use href="#i-list"/></svg>Audit log</button>
+      <button class="nav-item" data-console="attestation"><svg class="ico"><use href="#i-shield"/></svg>Attestation</button>
+      <button class="nav-item" data-console="api"><svg class="ico"><use href="#i-code"/></svg>API reference</button>
+    </nav>
+    <nav class="nav" aria-label="Manage">
+      <div class="nav-label">Manage</div>
+      <button class="nav-item" data-go="models"><svg class="ico"><use href="#i-cube"/></svg>Models<span class="count" id="n-models"></span></button>
+      <button class="nav-item" data-go="bundles"><svg class="ico"><use href="#i-lock"/></svg>Sealed bundles<span class="count" id="n-bundles"></span></button>
+      <button class="nav-item" data-go="keys"><svg class="ico"><use href="#i-key"/></svg>Keys<span class="flag" id="n-keys" hidden></span></button>
+    </nav>
+    <nav class="nav" aria-label="Deployment">
+      <div class="nav-label">Deployment</div>
+      <button class="nav-item" data-go="deployment"><svg class="ico"><use href="#i-layers"/></svg>Mode<span class="count" id="n-mode"></span></button>
+      <button class="nav-item" data-go="remote"><svg class="ico"><use href="#i-globe"/></svg>Remote access<span class="count" id="n-remote"></span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="nav-item" data-go="settings"><svg class="ico"><use href="#i-gear"/></svg>Settings</button>
+    </div>
+  </aside>
 
-    <!-- ── First run: choose a model ─────────────────────────────────── -->
-    <section id="view-welcome" hidden>
-      <div class="page">
-        <h1>Choose a model to run</h1>
-        <p class="lede">Cordon runs it on this computer with llama.cpp. The download is the only
-          time anything leaves the machine.</p>
+  <main class="panel">
+    <div class="scroll" id="main">
 
-        <div class="section">
-          <div class="list" id="catalog"></div>
-          <p class="faint" id="hardware-line" hidden></p>
-        </div>
-
-        <div class="other">
-          <div class="card">
-            <h2>Use a file you already have</h2>
-            <p>Any GGUF model on disk. Cordon serves it where it is and never modifies it.</p>
-            <div class="actions"><button class="btn" id="import">Open GGUF file…</button></div>
+      <!-- First run -->
+      <section id="view-welcome" hidden>
+        <div class="page">
+          <div class="hero hero--intro">
+            <div class="hero-mark"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 22V4H28V28H11V11H21V21" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"/><rect class="mark-core" x="13.8" y="13.8" width="4.4" height="4.4"/></svg></div>
+            <h1>Run a model privately</h1>
+            <p class="lede">Cordon runs it on this computer, behind identity, policy and a tamper-evident audit log. Downloading it is the only time anything leaves the machine.</p>
           </div>
-          <div class="card">
-            <h2>Download from Hugging Face</h2>
-            <p>A repository that publishes a single-file GGUF. Add <span class="mono">:Q4_K_M</span>
-              to pick a quantisation.</p>
-            <div class="field-row">
-              <input class="input mono" id="repo" placeholder="owner/repo" spellcheck="false" autocomplete="off">
-              <button class="btn" id="repo-go">Download</button>
+          <div class="section">
+            <div class="section-head"><h2>Choose a model</h2><p id="hardware-line"></p></div>
+            <div class="group" id="welcome-catalog"></div>
+          </div>
+          <div class="section">
+            <div class="group">
+              <div class="row">
+                <div class="row-icon"><svg class="ico"><use href="#i-file"/></svg></div>
+                <div class="grow"><div class="row-title">Use a GGUF file you already have</div>
+                  <div class="row-desc">Served where it is. Cordon never modifies it.</div></div>
+                <div class="row-control"><button class="btn" data-act="import-model">Open file…</button></div>
+              </div>
+              <div class="row">
+                <div class="row-icon"><svg class="ico"><use href="#i-download"/></svg></div>
+                <div class="grow"><div class="row-title">Download from Hugging Face</div>
+                  <div class="row-desc">A repository with a single-file GGUF. Add <span class="mono">:Q4_K_M</span> for a quantisation.</div></div>
+                <div class="row-control field-row w-320">
+                  <input class="input input--mono" data-repo placeholder="owner/repo" spellcheck="false" autocomplete="off">
+                  <button class="btn" data-act="repo-download">Download</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <!-- ── Starting ───────────────────────────────────────────────────── -->
-    <section id="view-starting" class="center" hidden>
-      <div class="boot">
-        <h1 id="boot-title">Starting Cordon</h1>
-        <p class="boot-model" id="boot-model"></p>
-        <div class="progress progress--busy"><div class="progress-fill"></div></div>
-        <div class="boot-step"><span id="boot-step">Preparing</span><span class="mono" id="boot-elapsed">0s</span></div>
-        <pre class="log" id="boot-log" hidden></pre>
-        <div class="actions section-gap">
-          <button class="btn btn--ghost btn--sm" id="boot-details" aria-expanded="false">Show details</button>
+      <!-- Overview: not running, starting, failed, or a hardened node's status -->
+      <section id="view-home" hidden>
+        <div class="page" id="home"></div>
+      </section>
+
+      <!-- Models -->
+      <section id="view-models" hidden>
+        <div class="page">
+          <div class="page-head">
+            <div class="text"><h1>Models</h1><p class="lede">Models on this computer, and ones worth downloading. The one in use is served by the node.</p></div>
+            <div class="actions"><button class="btn" data-act="import-model"><svg class="ico"><use href="#i-file"/></svg>Open GGUF…</button></div>
+          </div>
+          <div class="notice" id="models-egress" data-tone="accent" hidden>
+            <svg class="ico"><use href="#i-info"/></svg>
+            <div class="body"><strong>Downloads are off in this mode.</strong> It makes no outbound connections. Bring models in as sealed bundles from another machine.</div>
+          </div>
+          <div class="section">
+            <div class="section-head"><h2>On this computer</h2><p id="models-count"></p></div>
+            <div class="group" id="models-local"></div>
+          </div>
+          <div class="section" id="models-catalog-section">
+            <div class="section-head"><h2>Download</h2><p>Checked against the digest the publisher released. Downloads resume if interrupted.</p></div>
+            <div class="group" id="models-catalog"></div>
+            <div class="field-row repo-row">
+              <input class="input input--mono" data-repo placeholder="Another Hugging Face repository, owner/repo" spellcheck="false" autocomplete="off">
+              <button class="btn" data-act="repo-download">Download</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bundles -->
+      <section id="view-bundles" hidden>
+        <div class="page">
+          <div class="page-head">
+            <div class="text"><h1>Sealed bundles</h1><p class="lede">A sealed bundle is a model encrypted under your key: AES-256-GCM, one derived key per shard. The node decrypts it only to load it, and nothing without the key can read it.</p></div>
+            <div class="actions">
+              <button class="btn" data-act="bundle-import"><svg class="ico"><use href="#i-upload"/></svg>Import…</button>
+              <button class="btn btn--primary" data-act="bundle-seal"><svg class="ico"><use href="#i-lock"/></svg>Seal a model</button>
+            </div>
+          </div>
+          <div id="bundles-key-notice"></div>
+          <div id="bundles-job"></div>
+          <div class="section"><div class="group" id="bundles-list"></div></div>
+        </div>
+      </section>
+
+      <!-- Keys -->
+      <section id="view-keys" hidden>
+        <div class="page">
+          <div class="page-head">
+            <div class="text"><h1>Keys</h1><p class="lede">Your Client Master Key seals bundles and, outside Light mode, signs the audit log and every response. Everything Cordon derives comes from it.</p></div>
+          </div>
+          <div id="keys-body"></div>
+        </div>
+      </section>
+
+      <!-- Deployment mode -->
+      <section id="view-deployment" hidden>
+        <div class="page page--wide">
+          <div class="page-head">
+            <div class="text"><h1>Deployment mode</h1><p class="lede">What the node claims about itself. Each mode past Light rests on hardware and keys it checks at start, and refuses to run if they are missing.</p></div>
+          </div>
+          <div class="modes" id="modes"></div>
+          <div class="section" id="readiness"></div>
+        </div>
+      </section>
+
+      <!-- Remote access -->
+      <section id="view-remote" hidden>
+        <div class="page">
+          <div class="page-head">
+            <div class="text"><h1>Remote access</h1><p class="lede">Let other machines use this node. Exposure is always mutual TLS: every caller needs a certificate you issued here, and you can revoke it.</p></div>
+          </div>
+          <div id="remote-body"></div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section id="view-settings" hidden>
+        <div class="page">
+          <div class="page-head">
+            <div class="text"><h1>Settings</h1><p class="lede" id="settings-lede"></p></div>
+          </div>
+
+          <div class="section">
+            <div class="section-head"><h2>Performance</h2></div>
+            <div class="group">
+              <div class="setting">
+                <div><div class="label">GPU offload</div><div class="help">Auto places as many layers on the GPU as its free memory allows.</div></div>
+                <div class="control">
+                  <div class="segmented" role="group" aria-label="GPU offload" id="gpu-mode">
+                    <button data-mode="auto">Auto</button><button data-mode="all">All</button><button data-mode="cpu">CPU</button><button data-mode="custom">Custom</button>
+                  </div>
+                  <div class="field-row" id="gpu-custom" hidden><input class="input input--num" id="gpu-layers" type="number" min="1" max="999"><span class="faint">layers</span></div>
+                  <div class="faint" id="devices"></div>
+                </div>
+              </div>
+              <div class="setting">
+                <div><div class="label">Context length</div><div class="help">Tokens shared by every request in flight. Longer contexts use more memory.</div></div>
+                <div class="control">
+                  <select class="input w-180" id="ctx">
+                    <option value="2048">2,048 tokens</option><option value="4096">4,096 tokens</option>
+                    <option value="8192">8,192 tokens</option><option value="16384">16,384 tokens</option>
+                    <option value="32768">32,768 tokens</option><option value="65536">65,536 tokens</option>
+                    <option value="131072">131,072 tokens</option>
+                  </select>
+                </div>
+              </div>
+              <div class="setting">
+                <div><div class="label">Parallel requests</div><div class="help">Requests generated at once. They share the context.</div></div>
+                <div class="control"><input class="input input--num" id="parallel" type="number" min="1" max="32"></div>
+              </div>
+              <div class="setting">
+                <div><div class="label">CPU threads</div><div class="help">Leave automatic unless generation competes with other work.</div></div>
+                <div class="control">
+                  <label class="switch"><span class="faint" id="threads-hint"></span><input type="checkbox" id="threads-auto"><span class="switch-track"></span></label>
+                  <input class="input input--num" id="threads" type="number" min="1" max="256" hidden>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-head"><h2>This computer</h2></div>
+            <div class="group">
+              <div class="setting">
+                <div><div class="label">API port</div><div class="help">Plain HTTP on 127.0.0.1. With remote access on, the API moves to its own port and requires certificates.</div></div>
+                <div class="control"><input class="input input--num" id="api-port" type="number" min="1" max="65535"><div class="faint" id="api-url"></div></div>
+              </div>
+              <div class="setting">
+                <div><div class="label">Console port</div><div class="help">The operator console, on 127.0.0.1 only. Also reachable from a browser here.</div></div>
+                <div class="control"><input class="input input--num" id="console-port" type="number" min="1" max="65535"></div>
+              </div>
+              <div class="setting">
+                <div><div class="label">Key principal</div><div class="help">The client your key was issued to. Bundles are sealed for it, and the node must use the same one.</div></div>
+                <div class="control"><input class="input input--mono w-180" id="principal" spellcheck="false"></div>
+              </div>
+              <div class="setting">
+                <div><div class="label">Start with Cordon</div><div class="help">Load the selected model when the app opens.</div></div>
+                <div class="control"><label class="switch"><input type="checkbox" id="autostart"><span class="switch-track"></span></label></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-head"><h2>Appearance</h2></div>
+            <div class="group">
+              <div class="setting">
+                <div><div class="label">Theme</div></div>
+                <div class="control">
+                  <div class="segmented" role="group" aria-label="Theme" id="theme">
+                    <button data-theme="system">System</button><button data-theme="light">Light</button><button data-theme="dark">Dark</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-head"><h2>Command line</h2></div>
+            <div class="group" id="cli"></div>
+          </div>
+
+          <div class="section">
+            <div class="section-head"><h2>About</h2></div>
+            <div class="group"><div class="row row--top"><dl class="facts grow" id="about"></dl></div>
+              <div class="row"><div class="actions">
+                <button class="btn btn--sm" data-reveal="data">Data folder</button>
+                <button class="btn btn--sm" data-reveal="logs">Log file</button>
+              </div></div>
+            </div>
+          </div>
+        </div>
+        <div class="savebar" id="savebar" hidden>
+          <span class="muted" id="save-note">Unsaved changes</span>
           <span class="spacer"></span>
-          <button class="btn btn--sm" id="boot-cancel">Cancel</button>
+          <button class="btn btn--ghost" id="discard">Discard</button>
+          <button class="btn btn--primary" id="save">Save</button>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <!-- ── Stopped or failed ─────────────────────────────────────────── -->
-    <section id="view-stopped" class="center" hidden>
-      <div class="boot">
-        <h1 id="stopped-title">Cordon is stopped</h1>
-        <p class="boot-model" id="stopped-model"></p>
-        <div class="error" id="stopped-error" hidden></div>
-        <pre class="log log--tall" id="stopped-log" hidden></pre>
-        <div class="actions section">
-          <button class="btn btn--primary" id="stopped-start">Start</button>
-          <button class="btn" id="stopped-settings">Settings</button>
-          <span class="spacer"></span>
-          <button class="btn btn--ghost btn--sm" id="stopped-logs">Show log file</button>
-        </div>
-      </div>
-    </section>
+      <section id="view-outside" hidden>
+        <div class="hero"><h1>This page runs inside the Cordon app</h1><p class="lede">Open the Cordon application to use it.</p></div>
+      </section>
 
-    <!-- ── Settings ───────────────────────────────────────────────────── -->
-    <section id="view-settings" hidden>
-      <div class="page">
-        <h1>Settings</h1>
-        <p class="lede" id="settings-lede">Changes to the model or performance restart the runtime.</p>
-
-        <div class="section">
-          <div class="section-head"><h2>Model</h2><p id="models-count"></p></div>
-          <div class="list" id="models"></div>
-          <div class="actions section-gap" id="model-actions">
-            <button class="btn btn--sm" id="settings-import">Open GGUF file…</button>
-            <button class="btn btn--sm btn--ghost" id="settings-catalog">Download another model…</button>
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-head"><h2>Performance</h2></div>
-          <div class="form">
-            <div class="row">
-              <div><div class="row-label">GPU offload</div>
-                <div class="row-help">Auto places as many layers on the GPU as its free memory allows.</div></div>
-              <div class="row-control">
-                <div class="segmented" role="group" aria-label="GPU offload" id="gpu-mode">
-                  <button data-mode="auto">Auto</button>
-                  <button data-mode="all">All layers</button>
-                  <button data-mode="cpu">CPU only</button>
-                  <button data-mode="custom">Custom</button>
-                </div>
-                <div class="field-row" id="gpu-custom" hidden>
-                  <input class="input input--num mono" id="gpu-layers" type="number" min="1" max="999">
-                  <span class="faint">layers</span>
-                </div>
-                <div class="faint" id="devices"></div>
-              </div>
-            </div>
-            <div class="row">
-              <div><div class="row-label">Context length</div>
-                <div class="row-help">Tokens shared by all requests in flight. Longer contexts use more memory.</div></div>
-              <div class="row-control">
-                <select class="input input--select" id="ctx">
-                  <option value="2048">2,048 tokens</option>
-                  <option value="4096">4,096 tokens</option>
-                  <option value="8192">8,192 tokens</option>
-                  <option value="16384">16,384 tokens</option>
-                  <option value="32768">32,768 tokens</option>
-                  <option value="65536">65,536 tokens</option>
-                  <option value="131072">131,072 tokens</option>
-                </select>
-              </div>
-            </div>
-            <div class="row">
-              <div><div class="row-label">Parallel requests</div>
-                <div class="row-help">How many requests are generated at once. More requests share the same context.</div></div>
-              <div class="row-control"><input class="input input--num mono" id="parallel" type="number" min="1" max="32"></div>
-            </div>
-            <div class="row">
-              <div><div class="row-label">CPU threads</div>
-                <div class="row-help">Leave on automatic unless generation competes with other work.</div></div>
-              <div class="row-control">
-                <label class="switch"><input type="checkbox" id="threads-auto"><span class="switch-track"></span><span>Automatic</span></label>
-                <div class="field-row" id="threads-custom" hidden>
-                  <input class="input input--num mono" id="threads" type="number" min="1" max="256">
-                  <span class="faint" id="threads-hint"></span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-head"><h2>Access</h2></div>
-          <div class="form">
-            <div class="row">
-              <div><div class="row-label">API port</div>
-                <div class="row-help">Plain HTTP on 127.0.0.1 only. Clients identify themselves with the <span class="mono">x-client-id</span> header.</div></div>
-              <div class="row-control">
-                <input class="input input--num mono" id="api-port" type="number" min="1" max="65535">
-                <div class="faint" id="api-url"></div>
-              </div>
-            </div>
-            <div class="row">
-              <div><div class="row-label">Console port</div>
-                <div class="row-help">The operator console. Also reachable from a browser on this computer.</div></div>
-              <div class="row-control">
-                <input class="input input--num mono" id="console-port" type="number" min="1" max="65535">
-                <div class="faint" id="console-url"></div>
-              </div>
-            </div>
-            <div class="row">
-              <div><div class="row-label">Start on launch</div>
-                <div class="row-help">Load the selected model when Cordon opens.</div></div>
-              <div class="row-control">
-                <label class="switch"><input type="checkbox" id="autostart"><span class="switch-track"></span><span>Enabled</span></label>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-head"><h2>About</h2></div>
-          <div class="form"><div class="row"><div class="row-label">This installation</div>
-            <div class="row-control">
-              <dl class="facts" id="about"></dl>
-              <div class="actions">
-                <button class="btn btn--sm" id="show-data">Show data folder</button>
-                <button class="btn btn--sm" id="show-logs">Show log file</button>
-              </div>
-            </div></div></div>
-        </div>
-
-        <div class="savebar">
-          <span class="note" id="save-note">No unsaved changes</span>
-          <button class="btn btn--ghost" id="discard" disabled>Discard</button>
-          <button class="btn btn--primary" id="save" disabled>Save</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ── Catalog from settings ──────────────────────────────────────── -->
-    <section id="view-catalog" hidden>
-      <div class="page">
-        <div class="actions"><button class="btn btn--sm btn--ghost" id="catalog-back">‹ Settings</button></div>
-        <h1 class="section-gap">Download a model</h1>
-        <p class="lede">Downloads resume if interrupted, and are checked against the digest the publisher released.</p>
-        <div class="section"><div class="list" id="catalog-2"></div></div>
-      </div>
-    </section>
-
-    <!-- Shown only when the page is opened outside the app. -->
-    <section id="view-outside" class="center" hidden>
-      <div class="boot"><h1>This page runs inside the Cordon app</h1>
-        <p class="lede">Open the Cordon application to use it.</p></div>
-    </section>
-
+    </div>
   </main>
 </div>
+
+<dialog id="dialog"><form method="dialog" id="dialog-form"></form></dialog>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

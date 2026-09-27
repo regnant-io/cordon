@@ -85,7 +85,12 @@ pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
     // Await before taking the state lock: a `parking_lot` guard is not `Send`,
     // and holding one across an await would make this handler's future non-Send.
     let runtime_ready = node.inference.is_ready().await;
-    let loaded_model = node.inference.loaded_model().await;
+    // A node serving a sealed bundle is asked for it by the bundle's ID; the
+    // runtime only knows the name of the staged file it loaded.
+    let loaded_model = match node.served_bundle() {
+        Some(bundle) => Some(bundle.to_string()),
+        None => node.inference.loaded_model().await,
+    };
 
     let node_state = node.state.read();
     let status = node_state.status.to_string();
@@ -105,6 +110,7 @@ pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
             "is_placeholder": is_placeholder,
             "ready": runtime_ready,
             "model": loaded_model,
+            "sealed": node.served_bundle().is_some(),
             "active_requests": node.inference.active_requests(),
             "max_concurrent": node.inference.max_concurrent(),
             "active_sessions": node.inference.kv_cache().session_count(),

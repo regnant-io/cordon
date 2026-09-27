@@ -122,6 +122,17 @@ pub struct BundleManifest {
     pub client_approval_signature: String,
 }
 
+/// Whether a bundle ID is safe to use as a file and directory name component.
+pub fn is_safe_bundle_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 /// The encryption algorithm a bundle must declare.
 pub const REQUIRED_ENCRYPTION_ALGORITHM: &str = "AES-256-GCM";
 /// The key-derivation algorithm a bundle must declare.
@@ -177,6 +188,15 @@ impl BundleManifest {
             return Err(CordonError::ValidationFailed(
                 "bundle_id must not be empty".into(),
             ));
+        }
+        // The ID names the staging file the plaintext is decrypted into, so a
+        // manifest must not be able to steer that file out of the staging
+        // directory with separators or `..`.
+        if !is_safe_bundle_id(&self.bundle_id) {
+            return Err(CordonError::ValidationFailed(format!(
+                "bundle_id '{}' may contain only letters, digits, '.', '-' and '_'",
+                self.bundle_id
+            )));
         }
         if !self
             .encryption_algorithm

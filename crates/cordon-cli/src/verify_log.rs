@@ -31,7 +31,7 @@ use cordon_crypto::signing::VerifyingKey;
         No connection to the Cordon node is required.\n\n\
         Exit code: 0 = valid, 1 = invalid/tampered, 2 = error"
 )]
-struct Cli {
+pub struct Cli {
     /// Path to audit log file or directory containing .jsonl files
     #[arg(short, long)]
     log: PathBuf,
@@ -53,9 +53,14 @@ struct Cli {
     summary: bool,
 }
 
+#[allow(dead_code)]
 fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
+    exit_code(Cli::parse())
+}
 
+/// Verify, and turn the outcome into the documented exit status. Shared by
+/// `cordon-verify-log` and `cordon log verify`.
+pub fn exit_code(cli: Cli) -> std::process::ExitCode {
     match run(cli) {
         Ok(valid) => {
             if valid {

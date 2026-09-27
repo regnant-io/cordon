@@ -75,6 +75,8 @@ pub struct LlamaRuntimeConfig {
     pub startup_timeout: Duration,
     /// Additional arguments appended verbatim.
     pub extra_args: Vec<String>,
+    /// Read the model into memory rather than memory-mapping it.
+    pub no_mmap: bool,
 }
 
 impl LlamaRuntimeConfig {
@@ -89,6 +91,7 @@ impl LlamaRuntimeConfig {
             parallel_slots: 4,
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             extra_args: Vec::new(),
+            no_mmap: false,
         }
     }
 }
@@ -107,6 +110,11 @@ struct SupportedFlags {
     no_slots: bool,
     /// `--n-gpu-layers` accepts `auto` and `all` as well as a count.
     gpu_layer_words: bool,
+    /// `--load-mode none` loads without memory-mapping. Builds from late 2026
+    /// replaced `--no-mmap` with it.
+    load_mode: bool,
+    /// `--no-mmap`, the older spelling.
+    no_mmap: bool,
 }
 
 /// A running, supervised llama.cpp server.
@@ -177,6 +185,18 @@ impl LlamaSupervisor {
                 CordonError::Internal(format!("cannot build runtime HTTP client: {}", e))
             })?;
 
+        // A sealed bundle's decrypted file is erased once loaded. A runtime
+        // that can only memory-map it would keep plaintext weights on disk
+        // for its whole life, so that is refused rather than warned about.
+        if config.no_mmap && !flags.load_mode && !flags.no_mmap {
+            return Err(CordonError::RuntimeUnavailable(format!(
+                "{} cannot be told to load a model without memory-mapping it \
+                 (neither --load-mode nor --no-mmap), which serving a sealed bundle \
+                 requires. Use a newer llama.cpp.",
+                config.binary.display()
+            )));
+        }
+
         if !flags.kv_unified && config.parallel_slots > 1 {
             tracing::warn!(
                 ctx_size = config.ctx_size,
@@ -232,6 +252,8 @@ impl LlamaSupervisor {
                 kv_unified: true,
                 no_slots: true,
                 gpu_layer_words: true,
+                load_mode: true,
+                no_mmap: false,
             },
             http: reqwest::Client::new(),
             #[cfg(windows)]
@@ -278,6 +300,13 @@ impl LlamaSupervisor {
         }
         if self.flags.no_slots {
             cmd.arg("--no-slots");
+        }
+        if self.config.no_mmap {
+            if self.flags.load_mode {
+                cmd.arg("--load-mode").arg("none");
+            } else {
+                cmd.arg("--no-mmap");
+            }
         }
 
         match &self.api_key_file {
@@ -651,6 +680,8 @@ impl SupportedFlags {
             kv_unified: text.contains("--kv-unified"),
             no_slots: text.contains("--no-slots"),
             gpu_layer_words: text.contains("'auto', or 'all'"),
+            load_mode: text.contains("--load-mode"),
+            no_mmap: text.contains("--no-mmap"),
         }
     }
 }
@@ -718,6 +749,9 @@ fn bundled_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     vec![
         exe_dir.join(LLAMA_SERVER_EXE),
         exe_dir.join("llama").join(LLAMA_SERVER_EXE),
+        // The desktop app ships the `cordon` command line in a `bin` folder
+        // beside the runtime, so the installed CLI serves with the same build.
+        exe_dir.join("..").join("llama").join(LLAMA_SERVER_EXE),
         // A macOS application bundle keeps resources beside, not inside,
         // `Contents/MacOS`.
         exe_dir
@@ -769,10 +803,17 @@ mod tests {
         );
         assert!(flags.no_webui && flags.api_key_file && flags.kv_unified);
         assert!(flags.no_slots && flags.gpu_layer_words);
+        assert!(!flags.load_mode && !flags.no_mmap);
 
         let none = SupportedFlags::from_help("usage: llama-server [options]");
         assert!(!none.no_webui && !none.api_key_file && !none.kv_unified);
         assert!(!none.no_slots && !none.gpu_layer_words);
+
+        // Late-2026 builds take --load-mode; earlier ones --no-mmap.
+        let new = SupportedFlags::from_help("-lm,   --load-mode MODE   model loading mode");
+        assert!(new.load_mode && !new.no_mmap);
+        let old = SupportedFlags::from_help("--mmap, --no-mmap   whether to memory-map the model");
+        assert!(old.no_mmap && !old.load_mode);
     }
 
     #[test]

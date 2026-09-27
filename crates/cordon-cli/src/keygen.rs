@@ -30,6 +30,7 @@ use clap::{Parser, Subcommand};
 
 use cordon_crypto::hierarchy::MasterKey;
 
+#[allow(dead_code)]
 #[derive(Parser)]
 #[command(
     name = "cordon-keygen",
@@ -47,7 +48,7 @@ struct Cli {
 
 /// How to obtain the Client Master Key. Shared by every command that needs one.
 #[derive(clap::Args)]
-struct CmkSource {
+pub struct CmkSource {
     /// File containing the Client Master Key, hex. Preferred.
     #[arg(long, conflicts_with = "cmk")]
     cmk_file: Option<PathBuf>,
@@ -76,7 +77,7 @@ impl CmkSource {
 }
 
 #[derive(Subcommand)]
-enum Command {
+pub enum Command {
     /// Generate a new Client Master Key and write its public halves.
     Generate {
         /// Directory to write key material into.
@@ -172,8 +173,14 @@ enum Command {
     },
 }
 
+#[allow(dead_code)]
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    run(Cli::parse().command)
+}
+
+/// Run one keygen command. Shared by `cordon-keygen` and `cordon keys`.
+pub fn run(command: Command) -> Result<()> {
+    match command {
         Command::Generate {
             output,
             deployment_id,

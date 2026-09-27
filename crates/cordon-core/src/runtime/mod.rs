@@ -86,6 +86,7 @@ async fn build_supervised(config: &CordonConfig) -> CordonResult<BuiltRuntime> {
     runtime_config.startup_timeout =
         std::time::Duration::from_secs(config.runtime.startup_timeout_seconds);
     runtime_config.extra_args = config.runtime.extra_args.clone();
+    runtime_config.no_mmap = config.runtime.no_mmap;
 
     let supervisor = Arc::new(LlamaSupervisor::start(runtime_config).await?);
     let backend = Arc::new(OpenAiBackend::supervised(supervisor.clone())?);

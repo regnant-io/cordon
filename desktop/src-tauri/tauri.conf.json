@@ -4,7 +4,8 @@
   "mainBinaryName": "Cordon",
   "identifier": "dev.cordon.desktop",
   "build": {
-    "frontendDist": "../shell"
+    "frontendDist": "../shell",
+    "beforeBuildCommand": "node scripts/stage-cli.mjs"
   },
   "app": {
     "withGlobalTauri": true,
@@ -21,7 +22,7 @@
     "copyright": "Copyright The Cordon Authors. Licensed under Apache-2.0.",
     "category": "DeveloperTool",
     "shortDescription": "A confidential inference control plane with a local model runtime",
-    "longDescription": "Cordon runs a local language model behind identity, policy, output filtering, a tamper-evident audit log and signed responses. The desktop app ships llama.cpp, downloads a model, and opens the operator console.",
+    "longDescription": "Cordon runs a local language model behind identity, policy, output filtering, a tamper-evident audit log and signed responses. The desktop app ships llama.cpp and the cordon command line, seals models into encrypted bundles, runs in any deployment mode the hardware supports, and can expose the node to other machines over mutual TLS.",
     "homepage": "https://github.com/regnant-io/cordon",
     "license": "Apache-2.0",
     "licenseFile": "../../LICENSE",
@@ -33,7 +34,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "llama/": "llama/"
+      "llama/": "llama/",
+      "bin/": "bin/"
     },
     "windows": {
       "webviewInstallMode": {
@@ -44,7 +46,8 @@
         "installMode": "currentUser",
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
-        "startMenuFolder": "Cordon"
+        "startMenuFolder": "Cordon",
+        "installerHooks": "windows/hooks.nsh"
       }
     },
     "macOS": {
@@ -52,10 +55,14 @@
     },
     "linux": {
       "deb": {
-        "depends": ["libvulkan1"]
+        "depends": [
+          "libvulkan1"
+        ]
       },
       "rpm": {
-        "depends": ["vulkan-loader"]
+        "depends": [
+          "vulkan-loader"
+        ]
       }
     }
   }

@@ -76,7 +76,7 @@ pub fn generate_self_signed_cert(common_name: &str, cert_out: &Path, key_out: &P
 }
 
 /// Write a private key readable only by its owner.
-fn write_private_key(path: &Path, pem: &str) -> Result<()> {
+pub(crate) fn write_private_key(path: &Path, pem: &str) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).truncate(true);
 

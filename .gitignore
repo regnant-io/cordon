@@ -50,5 +50,7 @@ Thumbs.db
 # ── Desktop app ────────────────────────────────────────────────────────────
 # The bundled llama.cpp is fetched by scripts/fetch-llama, not committed.
 /desktop/src-tauri/llama/
+# The cordon command line, staged by desktop/scripts/stage-cli.mjs.
+/desktop/src-tauri/bin/
 /desktop/src-tauri/gen/
 /desktop/node_modules/

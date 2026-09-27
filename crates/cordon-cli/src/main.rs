@@ -20,7 +20,13 @@ use cordon_core::{
 };
 
 mod doctor;
+#[path = "keygen.rs"]
+mod keygen;
+#[path = "provision.rs"]
+mod provision;
 mod pull;
+#[path = "verify_log.rs"]
+mod verify_log;
 
 /// Where `cordon serve` listens when no configuration file and no `--bind` say
 /// otherwise.
@@ -196,6 +202,56 @@ enum Command {
         #[arg(short, long, default_value = "light")]
         mode: String,
     },
+
+    /// Seal model weights into an encrypted bundle, and check bundles.
+    Bundle {
+        #[command(subcommand)]
+        command: provision::Command,
+    },
+
+    /// Create a Client Master Key and derive the keys that come from it.
+    Keys {
+        #[command(subcommand)]
+        command: keygen::Command,
+    },
+
+    /// Verify an audit log offline, against the log key's public half.
+    VerifyLog(verify_log::Cli),
+
+    /// Run a private certificate authority for mutual TLS.
+    Pki {
+        #[command(subcommand)]
+        command: PkiCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PkiCommand {
+    /// Create the CA, if there is none, and a server certificate covering this
+    /// machine's names and any given with --name.
+    Init {
+        /// Directory the CA and server certificate live in.
+        #[arg(long, default_value = "./cordon-pki")]
+        dir: PathBuf,
+        /// Another DNS name or IP address clients reach the node by.
+        /// Repeatable.
+        #[arg(long = "name", value_name = "NAME")]
+        names: Vec<String>,
+    },
+    /// Issue a client certificate. Its CN is the client ID the node sees.
+    Issue {
+        /// The client ID.
+        client_id: String,
+        /// Directory the CA lives in.
+        #[arg(long, default_value = "./cordon-pki")]
+        dir: PathBuf,
+        /// Days the certificate is valid for.
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+        /// Directory to write the client's files into. Defaults to the client ID.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -214,6 +270,21 @@ async fn main() -> Result<()> {
             pin,
         } => attest(&api, &client_id, pin).await,
         Command::DefaultConfig { mode } => print_default_config(&mode),
+        Command::Bundle { command } => provision::run(command),
+        Command::Keys { command } => keygen::run(command),
+        Command::VerifyLog(args) => {
+            let code = verify_log::exit_code(args);
+            if code != std::process::ExitCode::SUCCESS {
+                // The verifier has already said why; keep its exit status.
+                std::process::exit(if code == std::process::ExitCode::FAILURE {
+                    1
+                } else {
+                    2
+                });
+            }
+            Ok(())
+        }
+        Command::Pki { command } => pki(command),
 
         Command::Run {
             model,
@@ -316,6 +387,104 @@ async fn main() -> Result<()> {
             serve_with(cfg, &bind, tls).await
         }
     }
+}
+
+/// `cordon pki`.
+fn pki(command: PkiCommand) -> Result<()> {
+    use cordon_api::pki::{local_names, Pki};
+    match command {
+        PkiCommand::Init { dir, names } => {
+            let pki = Pki::new(&dir);
+            let created = pki.ensure_ca()?;
+            let mut all = local_names();
+            all.extend(names);
+            pki.ensure_server(&all)?;
+            let info = pki
+                .server_info()
+                .context("the server certificate was not written")?;
+            println!(
+                "{} {}",
+                if created {
+                    "Created a CA in"
+                } else {
+                    "Using the CA in"
+                },
+                dir.display()
+            );
+            println!("Server certificate covers: {}", info.names.join(", "));
+            println!();
+            println!("In the node's configuration:");
+            println!();
+            println!("  [network]");
+            println!(
+                "  tls_cert_path  = \"{}\"",
+                pki.server_cert_path().display()
+            );
+            println!("  tls_key_path   = \"{}\"", pki.server_key_path().display());
+            println!("  client_ca_path = \"{}\"", pki.ca_cert_path().display());
+            println!("  require_mtls   = true");
+            println!();
+            println!("Then issue each client a certificate: cordon pki issue <client-id>");
+            Ok(())
+        }
+        PkiCommand::Issue {
+            client_id,
+            dir,
+            days,
+            out,
+        } => {
+            let pki = Pki::new(&dir);
+            if !pki.has_ca() {
+                bail!("no CA in {}; run `cordon pki init` first", dir.display());
+            }
+            let issued = pki.issue_client(&client_id, days)?;
+            let out = out.unwrap_or_else(|| PathBuf::from(&issued.client_id));
+            write_client_bundle(&out, &issued)?;
+            println!(
+                "Issued {} (valid until {})",
+                issued.client_id,
+                issued.not_after.format("%Y-%m-%d")
+            );
+            println!("  files        {}", out.display());
+            println!("  fingerprint  {}", issued.fingerprint);
+            println!();
+            println!("To admit only this certificate, add its fingerprint to the client's");
+            println!("cert_pins in the client registry. Call the node with:");
+            println!();
+            println!(
+                "  curl --cert {0}/client.crt --key {0}/client.key --cacert {0}/ca.crt https://<host>:8443/v1/health",
+                out.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Write a client's certificate, key and CA into a new directory. The key is
+/// the one secret, and it is written owner-only where the platform allows.
+fn write_client_bundle(
+    out: &std::path::Path,
+    issued: &cordon_api::pki::IssuedClient,
+) -> Result<()> {
+    if out.exists() && std::fs::read_dir(out)?.next().is_some() {
+        bail!("{} already exists and is not empty", out.display());
+    }
+    std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
+    std::fs::write(out.join("client.crt"), &issued.cert_pem)?;
+    std::fs::write(out.join("ca.crt"), &issued.ca_pem)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write as _;
+    options
+        .open(out.join("client.key"))
+        .and_then(|mut f| f.write_all(issued.key_pem.as_bytes()))
+        .with_context(|| format!("cannot write {}", out.join("client.key").display()))?;
+    Ok(())
 }
 
 /// Where the API should listen: the flag if one was given, else the

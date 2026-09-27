@@ -115,7 +115,7 @@ pub async fn run(config_path: Option<&Path>, model_dir: &Path) -> Result<()> {
     if let Some(config) = &config {
         check_posture(&mut report, config);
     } else if config_path.is_none() {
-        check_key_material(&mut report);
+        check_key_material(&mut report, None);
     }
 
     let (warnings, failures) = report.render();
@@ -235,8 +235,21 @@ fn check_tpm(report: &mut Report) {
     }
 }
 
-fn check_key_material(report: &mut Report) {
-    if std::env::var("CORDON_CMK_FILE").is_ok() {
+fn check_key_material(report: &mut Report, config: Option<&CordonConfig>) {
+    if let Some(path) = config.and_then(|c| c.cmk_path.as_deref()) {
+        if path.is_file() {
+            report.pass(
+                "client master key",
+                format!("sourced from {} (cmk_path)", path.display()),
+            );
+        } else {
+            report.fail(
+                "client master key",
+                format!("cmk_path is {}, which cannot be read", path.display()),
+                "point cmk_path at the key file, or create one with `cordon keys generate`",
+            );
+        }
+    } else if std::env::var("CORDON_CMK_FILE").is_ok() {
         report.pass("client master key", "sourced from CORDON_CMK_FILE");
     } else if std::env::var("CORDON_CMK").is_ok() {
         report.warn(
@@ -249,7 +262,7 @@ fn check_key_material(report: &mut Report) {
         report.warn(
             "client master key",
             "not provisioned; signing keys will be generated at boot",
-            "generate one with `cordon-keygen generate`; without it the node \
+            "generate one with `cordon keys generate`; without it the node \
              self-certifies and its audit log carries no non-repudiation",
         );
     }
@@ -260,7 +273,7 @@ fn check_posture(report: &mut Report, config: &CordonConfig) {
     let is_light = config.mode == DeploymentMode::Light;
     report.pass("mode", config.mode.to_string());
 
-    check_key_material(report);
+    check_key_material(report, Some(config));
 
     match config.attestation.measurement_source {
         MeasurementSource::Tpm2 if tpm::is_available() => {

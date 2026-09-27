@@ -195,6 +195,8 @@ pub struct CordonNode {
     supervisor: Option<Arc<LlamaSupervisor>>,
     /// Staged plaintext weights, erased when the node drops.
     staged_model: Option<StagedModel>,
+    /// The bundle the supervised runtime loaded, when it serves one.
+    served_bundle: Option<String>,
     /// Process start time.
     pub started_at: Instant,
     /// Cancelled when the node shuts down. Every background task watches it,
@@ -333,6 +335,14 @@ impl CordonNode {
         // Decrypt any registered bundle the runtime is meant to serve before the
         // runtime starts, so it has a plaintext file to load.
         let staged_model = Self::stage_configured_bundle(&config, &model_store, &keys).await?;
+        let served_bundle = staged_model.as_ref().and_then(|_| {
+            config
+                .runtime
+                .model_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(str::to_string)
+        });
 
         let mut runtime_config = config.clone();
         if let Some(staged) = &staged_model {
@@ -340,10 +350,8 @@ impl CordonNode {
             // Memory mapping would keep the plaintext file open for the process
             // lifetime, which defeats erasing it after load. Reading it fully
             // into the runtime's address space lets the file be deleted at once.
-            runtime_config
-                .runtime
-                .extra_args
-                .push("--no-mmap".to_string());
+            // The supervisor turns this into whichever flag the build takes.
+            runtime_config.runtime.no_mmap = true;
         }
 
         let built = runtime::build_backend(&runtime_config).await?;
@@ -416,6 +424,7 @@ impl CordonNode {
             metrics,
             supervisor: built.supervisor,
             staged_model,
+            served_bundle,
             started_at: Instant::now(),
             stopping: tokio_util::sync::CancellationToken::new(),
         })
@@ -473,8 +482,13 @@ impl CordonNode {
     /// Derive the deployment's key set from the CMK, or generate an ephemeral
     /// one when no CMK is provisioned.
     fn provision_keys(config: &CordonConfig) -> CordonResult<(SigningKey, NodeKeys)> {
-        let key_principal =
-            std::env::var("CORDON_CLIENT_ID").unwrap_or_else(|_| "operator".to_string());
+        let key_principal = config
+            .key_principal
+            .clone()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .or_else(|| std::env::var("CORDON_CLIENT_ID").ok())
+            .unwrap_or_else(|| "operator".to_string());
         let insecure_admin = env_flag("CORDON_INSECURE_ADMIN");
         let allow_unregistered_models = env_flag("CORDON_ALLOW_UNREGISTERED_MODELS");
 
@@ -497,7 +511,7 @@ impl CordonNode {
             }
         }
 
-        match load_cmk_hex() {
+        match load_cmk_hex(config.cmk_path.as_deref())? {
             Some(cmk_hex) => {
                 let master = MasterKey::from_hex(cmk_hex.trim()).map_err(|e| {
                     CordonError::KeyError(format!("invalid Client Master Key: {}", e))
@@ -538,7 +552,7 @@ impl CordonNode {
                         "no Client Master Key is provisioned, but the node is in {} \
                          mode. Without a CMK the node signs its own audit log with a \
                          key it generated, so the log carries no non-repudiation. Set \
-                         CORDON_CMK_FILE, or run in Light mode.",
+                         cmk_path or CORDON_CMK_FILE, or run in Light mode.",
                         config.mode
                     )));
                 }
@@ -1041,6 +1055,11 @@ impl CordonNode {
         format!("CORDON_ADMIN:{}:{}", action, params)
     }
 
+    /// The bundle the runtime serves, when it serves one.
+    pub fn served_bundle(&self) -> Option<&str> {
+        self.served_bundle.as_deref()
+    }
+
     /// Derive the bundle key for a model, when a CMK is held.
     pub fn bundle_key_for(&self, bundle_id: &str) -> Option<BundleKey> {
         let master = self.keys.master.as_ref()?;
@@ -1227,8 +1246,22 @@ impl CordonNode {
 
         self.check_request_limits(messages, params, &policy)?;
 
-        self.model_store
-            .ensure_servable(model_id, self.keys.allow_unregistered_models)?;
+        // The store gate vouches for the weights being served. A node whose
+        // supervised runtime loaded a sealed bundle checks that bundle, and a
+        // request for "default" means it. A node whose runtime loaded a plain
+        // model file has no bundle in play, so a client's model label is not
+        // looked up in the store: doing so refused every request the moment
+        // any bundle was merely present in it.
+        let plain_file = self.served_bundle.is_none()
+            && self.config.runtime.backend == crate::config::RuntimeBackend::Supervised;
+        if !plain_file {
+            let gate_id = match &self.served_bundle {
+                Some(bundle) if model_id.is_empty() || model_id == "default" => bundle.as_str(),
+                _ => model_id,
+            };
+            self.model_store
+                .ensure_servable(gate_id, self.keys.allow_unregistered_models)?;
+        }
 
         self.rate_limiter
             .check(&client.client_id, params.max_tokens, &policy)
@@ -1716,13 +1749,6 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Source the Client Master Key.
-///
-/// `CORDON_CMK_FILE` is preferred: a file on a memory-backed filesystem is not
-/// visible in the process environment, which `/proc/<pid>/environ`, a crash
-/// dump, or a child process can all expose. `CORDON_CMK` is accepted for
-/// development and warns loudly. Production should source the key from an HSM
-/// over PKCS#11, which plugs in here.
 /// Read the local signing seed at `path`, creating it on first use.
 ///
 /// The file holds 64 hex characters and is readable only by the account
@@ -1780,7 +1806,36 @@ fn load_or_create_local_seed(path: &std::path::Path) -> CordonResult<[u8; 32]> {
     Ok(seed)
 }
 
-fn load_cmk_hex() -> Option<String> {
+/// Source the Client Master Key.
+///
+/// A file is preferred, named by `cmk_path` in the configuration or by
+/// `CORDON_CMK_FILE`: a file on a memory-backed filesystem is not visible in
+/// the process environment, which `/proc/<pid>/environ`, a crash dump, or a
+/// child process can all expose. `CORDON_CMK` is accepted for development and
+/// warns loudly.
+///
+/// A configured file that cannot be read is an error rather than "no key": a
+/// node that silently fell back to a local key would serve with a weaker
+/// guarantee than the operator configured.
+fn load_cmk_hex(configured: Option<&std::path::Path>) -> CordonResult<Option<String>> {
+    if let Some(path) = configured {
+        return std::fs::read_to_string(path)
+            .map(|contents| {
+                tracing::info!(path = %path.display(), "Client Master Key read from file");
+                Some(contents)
+            })
+            .map_err(|e| {
+                CordonError::KeyError(format!(
+                    "cannot read the Client Master Key at {}: {}",
+                    path.display(),
+                    e
+                ))
+            });
+    }
+    Ok(load_cmk_hex_from_env())
+}
+
+fn load_cmk_hex_from_env() -> Option<String> {
     if let Ok(path) = std::env::var("CORDON_CMK_FILE") {
         return match std::fs::read_to_string(&path) {
             Ok(contents) => {

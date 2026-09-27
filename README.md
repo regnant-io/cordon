@@ -278,8 +278,8 @@ one machine. That is occasionally what you want and usually not.
 ### Desktop app
 
 For Windows, macOS and Linux. The installer includes llama.cpp (build
-`b11026`, with Vulkan GPU support on Windows and Linux and Metal on macOS), so
-there is nothing else to set up.
+`b11026`, with Vulkan GPU support on Windows and Linux and Metal on macOS) and
+the `cordon` command line, so there is nothing else to set up.
 
 1. Download the installer for your platform from the
    [releases page](https://github.com/regnant-io/cordon/releases): `.exe` for
@@ -290,9 +290,21 @@ there is nothing else to set up.
 3. The model loads, and the window becomes the operator console described in
    [The operator console](#the-operator-console).
 
-The desktop app is `cordon run` without a terminal. It runs a Light-mode node
-in the app's own process, supervises llama.cpp on loopback, and serves the same
-API and console:
+The window is one application: the node's own views (Overview, Inference,
+Audit log, Attestation, API reference) and the app's pages share a sidebar and
+a title bar.
+
+| Page | What it does |
+|---|---|
+| **Models** | Models on this computer, downloads from Hugging Face, and GGUF files opened from disk. |
+| **Sealed bundles** | Seal a model into an encrypted bundle, verify it, serve it, export it for another node, or import one sealed elsewhere. |
+| **Keys** | Create or import the Client Master Key, back it up, remove it. It never leaves the app's data folder otherwise and is never shown. |
+| **Mode** | Choose the deployment mode, with a checklist of what it needs on this machine. |
+| **Remote access** | Let other machines reach the API over mutual TLS, issue and revoke client certificates. |
+| **Settings** | Performance, ports, the key principal, appearance, and putting `cordon` on `PATH`. |
+
+By default the app runs a Light-mode node, which is `cordon run` without a
+terminal:
 
 | | |
 |---|---|
@@ -300,18 +312,54 @@ API and console:
 | Console | `http://127.0.0.1:8478`, also reachable from a browser on the same machine |
 | Data | `%LOCALAPPDATA%\dev.cordon.desktop` (Windows), `~/Library/Application Support/dev.cordon.desktop` (macOS), `~/.local/share/dev.cordon.desktop` (Linux) |
 
-If a port is taken, another is chosen and shown in **Settings**
-(`Ctrl+,`), which also sets the model, GPU offload, context length, parallel
-requests and threads. Changing them restarts the runtime; requests in flight
-finish first.
+If a port is taken, another is chosen and shown in **Settings** (`Ctrl+,`).
+Changing performance or ports restarts the node; requests in flight finish
+first.
 
-What the desktop app does not change: it is Light mode. Signing keys are kept
-in the data directory (`node.key`), so the audit chain verifies across
-restarts, but the console will tell you, correctly, that those signatures are
-this machine's word only. For a deployment someone else has to trust, use
-`cordon serve` with a Client Master Key.
+**Sealing a model** takes one click: pick the model, and the app encrypts it
+under your key (AES-256-GCM, one HKDF-derived key per 256 MiB shard) into the
+node's own model store, or into a folder to carry to another node. Serving a
+sealed bundle decrypts it to a staging file only for the runtime to load, then
+erases it. A node serving a bundle signs with keys derived from your Client
+Master Key, so its audit log is kept apart from the Light-mode one, which is
+signed with this machine's key.
 
-Building it yourself is described in [desktop/README.md](desktop/README.md).
+**Deployment modes.** Light needs nothing. Sovereign Cloud, Vault, Island and
+Dark need a Client Master Key, a sealed model, mutual TLS (set up
+automatically), a hardware root of trust with pinned measurements, and for the
+last three, no outbound connections; Dark also records your declaration of
+FIPS 140-2 Level 4 key custody. The Mode page shows each requirement as met,
+something the app can set up, or something this machine cannot provide, and
+only offers to switch when every one is met. Hardware attestation is read on
+Linux (a TPM 2.0 through `tpm2-tools`, or an AMD SEV-SNP guest), so on Windows
+and macOS those modes show what is missing rather than pretending. Outside
+Light mode the node serves no console; the app's Overview reads the node
+directly instead.
+
+**Remote access** is offered in one shape only, the strictest Cordon has. The
+app runs its own certificate authority; the API listens on every interface on
+the port you choose (8443 by default) with TLS 1.3 only, and every connection
+must present a client certificate the app issued, or the handshake fails
+before any request is read. Each certificate is pinned by fingerprint in a
+client registry that denies anyone else, so revoking one takes effect when the
+node restarts, which the app does at once. Client limits, a 10-second
+handshake deadline and a connection cap apply; the console stays on loopback.
+Issuing a certificate saves the client's certificate, key, the CA and a README
+with `curl` and Python examples into a folder you choose; the key is not kept.
+Cordon does not open ports on your router: forward the port yourself, and add
+any public host name under **Public names** so the server certificate covers
+it.
+
+**The command line.** The installer puts the same `cordon` a server install
+has in a `bin` folder next to the app, and **Settings → Command line** adds it
+to your `PATH` (and the uninstaller removes it). It finds the bundled llama.cpp
+on its own. With it you can seal a bundle with the key the app created:
+
+```bash
+cordon bundle seal --weights model.gguf --cmk-file "%LOCALAPPDATA%\dev.cordon.desktop\keys\cmk.hex"
+```
+
+Building the app yourself is described in [desktop/README.md](desktop/README.md).
 
 ### From source
 
@@ -620,6 +668,10 @@ echo -n "<cmk-hex>" > /run/cordon/cmk
 export CORDON_CMK_FILE=/run/cordon/cmk
 ```
 
+or name the file in the configuration with `cmk_path = "/run/cordon/cmk"`,
+which takes precedence. A configured key file that cannot be read stops the
+node rather than letting it fall back to weaker keys.
+
 `CORDON_CMK` also works but reads the key from the environment, where it is
 visible to every child process and in crash dumps. Cordon warns when you use it.
 
@@ -657,43 +709,51 @@ cannot be replayed against another command.
 
 ## Encrypting a model bundle
 
-For deployments where the operator must not be able to read the weights:
+For deployments where the operator must not be able to read the weights. The
+desktop app does this from its **Sealed bundles** page; on a server:
 
 ```bash
-cordon-provision encrypt \
-  --weights ./qwen2.5-7b/ \
-  --cmk-file /run/cordon/cmk \
-  --bundle-id qwen2.5-7b \
-  --client-id operator \
-  --model-name "Qwen2.5 7B Instruct" \
-  --output /var/lib/cordon/bundles/qwen2.5-7b
+cordon bundle seal --weights ./qwen2.5-7b.gguf --cmk-file /run/cordon/cmk
 ```
+
+Only the weights and the key are required. The model name defaults to the file
+name, the bundle ID to that name plus a random suffix, the principal to
+`operator`, and the output to `<bundle-id>.bundle`. Pass `--model-name`,
+`--bundle-id`, `--client-id` or `--output` to choose them. A directory of
+weight files works as well as a single file.
 
 Weights are split into 256 MiB shards, each encrypted under its own derived key
-with a fresh nonce. Memory stays bounded regardless of model size.
+with a fresh nonce. Memory stays bounded regardless of model size. A seal that
+fails or is cancelled removes what it wrote, and the manifest is written last,
+so a half-written bundle is never mistaken for one.
 
-Verify a bundle on the node before serving it:
+Verify a bundle on the node before serving it; with the key, every shard is
+decrypted and checked:
 
 ```bash
-cordon-provision verify \
-  --bundle /var/lib/cordon/bundles/qwen2.5-7b \
-  --cmk-file /run/cordon/cmk --client-id operator
-
-cordon-provision inspect --bundle /var/lib/cordon/bundles/qwen2.5-7b
+cordon bundle verify --bundle /var/lib/cordon/bundles/qwen2.5-7b --cmk-file /run/cordon/cmk
+cordon bundle inspect --bundle /var/lib/cordon/bundles/qwen2.5-7b
 ```
 
-Point the runtime at the bundle ID rather than a file, and Cordon decrypts it at
-startup:
+Copy the bundle into the node's model store, and point the runtime at the
+bundle ID rather than a file. Cordon decrypts it at startup:
 
 ```toml
+cmk_path = "/run/cordon/cmk"   # or CORDON_CMK_FILE
+key_principal = "operator"     # or CORDON_CLIENT_ID
+
 [runtime]
 backend = "supervised"
-model_path = "qwen2.5-7b"    # a registered bundle ID
+model_path = "qwen2.5-7b-3f9a21c4"    # a registered bundle ID
 ```
 
 A manifest that claims `encryption_algorithm = "NONE"`, reuses a nonce, uses an
 all-zero nonce, or whose plaintext and ciphertext digests match is **refused**.
-Those describe plaintext weights wearing a bundle's clothing.
+Those describe plaintext weights wearing a bundle's clothing. So is a bundle ID
+with anything but letters, digits, `.`, `-` and `_`: the ID names the staging
+file, and must not be able to point it anywhere else.
+
+`cordon-provision encrypt` still works and takes the same flags.
 
 ---
 
@@ -966,9 +1026,9 @@ an existing file still loads; it simply no longer describes anything.
 
 | Variable | Effect |
 |---|---|
-| `CORDON_CMK_FILE` | Path to the Client Master Key. **Preferred.** |
+| `CORDON_CMK_FILE` | Path to the Client Master Key. **Preferred**, after `cmk_path` in the configuration. |
 | `CORDON_CMK` | The key itself, hex. Visible in the process environment; warns. |
-| `CORDON_CLIENT_ID` | Key-derivation principal. Default `operator`. |
+| `CORDON_CLIENT_ID` | Key-derivation principal, after `key_principal` in the configuration. Default `operator`. |
 | `CORDON_LLAMA_SERVER` | Path to `llama-server`. |
 | `CORDON_TPM_AK_CTX` | TPM attestation key context, for signed quotes. |
 | `HF_TOKEN` | Hugging Face token, for gated repositories. |
@@ -984,12 +1044,20 @@ guarantee, so setting them cannot silently weaken a production node.
 
 ## Tools
 
-| Binary | Purpose |
+Everything is reachable through `cordon`; the separate binaries remain for
+scripts that already use them.
+
+| Command | Purpose |
 |---|---|
-| `cordon` | `pull`, `run`, `serve`, `models`, `remove`, `doctor`, `status`, `attest`, `default-config` |
-| `cordon-keygen` | Generate a CMK, derive public keys, sign admin commands |
-| `cordon-provision` | `encrypt`, `verify`, `inspect` model bundles |
-| `cordon-verify-log` | Offline audit-chain verification |
+| `cordon pull`, `run`, `serve`, `models`, `remove`, `doctor`, `status`, `attest`, `default-config` | Fetch, serve and inspect models and nodes |
+| `cordon bundle seal`, `verify`, `inspect` | Encrypted model bundles (also `cordon-provision`) |
+| `cordon keys generate`, `public`, `derive`, `admin-sign` | The Client Master Key and what derives from it (also `cordon-keygen`) |
+| `cordon pki init`, `issue` | A private CA for mutual TLS: a server certificate for this machine's names, and one client certificate per caller |
+| `cordon verify-log` | Offline audit-chain verification (also `cordon-verify-log`) |
+
+`cordon pki init --name node.example.com` prints the `[network]` block to use
+the certificates it made; `cordon pki issue build-server` writes that client's
+certificate, key and the CA into a folder named after it.
 
 ---
 

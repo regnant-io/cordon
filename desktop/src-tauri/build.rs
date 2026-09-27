@@ -28,5 +28,14 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=llama");
 
+    // The `cordon` command line is staged into `bin` by scripts/stage-cli.mjs
+    // before an installer is built. The resource entry needs the folder to
+    // exist for any other build.
+    let bin = Path::new("bin");
+    if !bin.exists() {
+        let _ = std::fs::create_dir_all(bin);
+    }
+    println!("cargo:rerun-if-changed=bin");
+
     tauri_build::build()
 }
