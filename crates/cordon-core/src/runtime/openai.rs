@@ -124,6 +124,12 @@ impl OpenAiBackend {
         if request.params.json_output {
             body["response_format"] = json!({ "type": "json_object" });
         }
+        if let Some(tools) = &request.params.tools {
+            body["tools"] = tools.clone();
+        }
+        if let Some(choice) = &request.params.tool_choice {
+            body["tool_choice"] = choice.clone();
+        }
         if stream {
             body["stream_options"] = json!({ "include_usage": true });
         }
@@ -202,11 +208,21 @@ impl InferenceBackend for OpenAiBackend {
 
         let usage = parse_usage(body.get("usage"));
 
+        // A model that calls tools answers in a structured field rather than
+        // in text. Kept as the runtime returned it; the node filters, hashes
+        // and signs it alongside the text.
+        let tool_calls = choice
+            .pointer("/message/tool_calls")
+            .and_then(|v| v.as_array())
+            .filter(|a| !a.is_empty())
+            .map(|calls| normalize_tool_calls(calls));
+
         Ok(RawInferenceOutput {
             text,
             usage,
             finish_reason,
             latency_ms: started.elapsed().as_millis() as u64,
+            tool_calls,
         })
     }
 
@@ -506,6 +522,27 @@ fn truncate(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
+}
+
+/// Tool calls in the one shape Cordon hashes, signs and returns: each call
+/// carries its position as `index` and its `type`, which runtimes include
+/// inconsistently. Normalising here, before the node hashes the output, is
+/// what lets a client recompute the signed hash from the response it got.
+fn normalize_tool_calls(calls: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::Value::Array(
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, call)| {
+                let mut call = call.clone();
+                if let Some(obj) = call.as_object_mut() {
+                    obj.insert("index".into(), json!(i));
+                    obj.entry("type").or_insert(json!("function"));
+                }
+                call
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

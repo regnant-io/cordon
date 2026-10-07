@@ -53,9 +53,9 @@ use crate::{
 /// The model a client gets when it names none, or names the generic `default`.
 const DEFAULT_MODEL: &str = "default";
 
-/// `POST /openai/v1/chat/completions` request body. Unknown fields (tools,
-/// response_format, seed, user, …) are accepted and ignored rather than
-/// refused, because SDKs send them by default.
+/// `POST /openai/v1/chat/completions` request body. Unknown fields (seed,
+/// user, logprobs, …) are accepted and ignored rather than refused, because
+/// SDKs send them by default.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
     #[serde(default)]
@@ -77,6 +77,11 @@ pub struct ChatCompletionRequest {
     stream: bool,
     #[serde(default)]
     response_format: Option<ResponseFormat>,
+    /// Tool definitions, passed to the runtime as given.
+    #[serde(default)]
+    tools: Option<Value>,
+    #[serde(default)]
+    tool_choice: Option<Value>,
 }
 
 /// `response_format`. `json_object` and `json_schema` both ask for JSON; the
@@ -92,6 +97,12 @@ struct ChatMessage {
     role: String,
     #[serde(default)]
     content: Option<Content>,
+    /// On an assistant message: the tool calls it made.
+    #[serde(default)]
+    tool_calls: Option<Value>,
+    /// On a `tool` message: the call it answers.
+    #[serde(default)]
+    tool_call_id: Option<String>,
 }
 
 /// Message content: a string, or the array-of-parts form newer clients send.
@@ -156,8 +167,20 @@ impl ChatCompletionRequest {
             } else {
                 m.role.clone()
             };
-            messages.push(Message { role, content });
+            messages.push(Message {
+                role,
+                content,
+                tool_calls: m
+                    .tool_calls
+                    .clone()
+                    .filter(|t| t.as_array().is_some_and(|a| !a.is_empty())),
+                tool_call_id: m.tool_call_id.clone(),
+            });
         }
+        let tools = self
+            .tools
+            .clone()
+            .filter(|t| t.as_array().is_some_and(|a| !a.is_empty()));
 
         let defaults = InferenceParams::default();
         let params = InferenceParams {
@@ -183,6 +206,8 @@ impl ChatCompletionRequest {
                 self.response_format.as_ref().map(|f| f.kind.as_str()),
                 Some("json_object") | Some("json_schema")
             ),
+            tool_choice: tools.as_ref().and(self.tool_choice.clone()),
+            tools,
         };
         Ok((messages, params))
     }
@@ -276,9 +301,14 @@ pub async fn chat_completions(
     let model_id = req.model_id();
     let timeout = resolve_timeout(&state.node, None);
 
-    if req.stream {
+    // A tool call is checked by the output filter as a whole, which a
+    // token-by-token stream cannot do before releasing the first fragment of
+    // its arguments. With tools offered, a streaming request is generated
+    // whole, filtered and signed, and then delivered as a stream.
+    if req.stream && params.tools.is_none() {
         return stream(state, client, model_id, messages, params, timeout).await;
     }
+    let streamed = req.stream;
 
     let outcome = state
         .node
@@ -286,7 +316,43 @@ pub async fn chat_completions(
         .await
         .map_err(map_err)?;
 
-    let timestamp = Utc::now();
+    if streamed {
+        return Ok(replay_as_stream(&state, outcome));
+    }
+
+    let (body, signature) = completion_body(&state, &outcome);
+    let mut response = (StatusCode::OK, Json(body)).into_response();
+    evidence_headers(
+        response.headers_mut(),
+        &signature.value,
+        &signature.key_provenance,
+    );
+    Ok(response)
+}
+
+/// Tool calls in a message, each with the `index` a streaming client needs.
+fn indexed_tool_calls(calls: &Value) -> Value {
+    let list = calls.as_array().cloned().unwrap_or_default();
+    Value::Array(
+        list.into_iter()
+            .enumerate()
+            .map(|(i, mut c)| {
+                if let Some(obj) = c.as_object_mut() {
+                    obj.entry("index").or_insert(json!(i));
+                    obj.entry("type").or_insert(json!("function"));
+                }
+                c
+            })
+            .collect(),
+    )
+}
+
+/// The `cordon` evidence object and the signature it carries.
+fn evidence(
+    state: &AppState,
+    outcome: &cordon_core::node::InferenceOutcome,
+    timestamp: chrono::DateTime<Utc>,
+) -> (Value, crate::types::ResponseSignature) {
     let signature = sign_response(
         &state.node,
         outcome.request_id,
@@ -300,47 +366,112 @@ pub async fn chat_completions(
         .config
         .sustained_attack
         .covert_channel_score_threshold;
+    let value = json!({
+        "request_id": outcome.request_id,
+        "session_id": outcome.session_id,
+        "client_id": outcome.client_id,
+        "timestamp": timestamp,
+        "output_hash": outcome.output_hash,
+        "output_hash_covers": if outcome.tool_calls.is_some() { "text+tool_calls" } else { "text" },
+        "mrenclave": outcome.mrenclave,
+        "content_policy": {
+            "triggered": outcome.content_policy_triggered,
+            "rules_matched": outcome.policy_rules_matched,
+        },
+        "covert_channel": {
+            "anomaly_detected": outcome.covert_channel_score > threshold,
+            "anomaly_score": outcome.covert_channel_score,
+        },
+        "signature": signature,
+    });
+    (value, signature)
+}
+
+/// A complete, signed generation delivered as an OpenAI stream: the text, the
+/// tool calls, then a final chunk with usage and the evidence.
+fn replay_as_stream(state: &AppState, outcome: cordon_core::node::InferenceOutcome) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+
+    let timestamp = Utc::now();
+    let (cordon, _) = evidence(state, &outcome, timestamp);
+    let id = format!("chatcmpl-{}", outcome.request_id);
+    let created = timestamp.timestamp();
+    let chunk = |delta: Value, finish: Option<&str>| {
+        json!({
+            "id": id, "object": "chat.completion.chunk", "created": created,
+            "model": outcome.model_id,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        })
+    };
+    let mut events = vec![chunk(json!({"role": "assistant", "content": ""}), None)];
+    if !outcome.output.is_empty() {
+        events.push(chunk(json!({"content": outcome.output}), None));
+    }
+    let finish = match &outcome.tool_calls {
+        Some(calls) => {
+            events.push(chunk(
+                json!({"tool_calls": indexed_tool_calls(calls)}),
+                None,
+            ));
+            "tool_calls"
+        }
+        None => openai_finish_reason(outcome.finish_reason),
+    };
+    let mut last = chunk(json!({}), Some(finish));
+    last["usage"] = json!({
+        "prompt_tokens": outcome.prompt_tokens,
+        "completion_tokens": outcome.completion_tokens,
+        "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
+    });
+    last["cordon"] = cordon;
+    events.push(last);
+
+    let stream = futures::stream::iter(
+        events
+            .into_iter()
+            .map(|e| Ok::<_, std::convert::Infallible>(Event::default().data(e.to_string())))
+            .chain(std::iter::once(Ok(Event::default().data("[DONE]")))),
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+fn completion_body(
+    state: &AppState,
+    outcome: &cordon_core::node::InferenceOutcome,
+) -> (Value, crate::types::ResponseSignature) {
+    let timestamp = Utc::now();
+    let (cordon, signature) = evidence(state, outcome, timestamp);
+    let (message, finish) = match &outcome.tool_calls {
+        Some(calls) => (
+            json!({
+                "role": "assistant",
+                // OpenAI sends null rather than "" when a turn is only calls.
+                "content": if outcome.output.is_empty() { Value::Null } else { json!(outcome.output) },
+                "tool_calls": indexed_tool_calls(calls),
+            }),
+            "tool_calls",
+        ),
+        None => (
+            json!({"role": "assistant", "content": outcome.output}),
+            openai_finish_reason(outcome.finish_reason),
+        ),
+    };
     let body = json!({
         "id": format!("chatcmpl-{}", outcome.request_id),
         "object": "chat.completion",
         "created": timestamp.timestamp(),
         "model": outcome.model_id,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": outcome.output},
-            "finish_reason": openai_finish_reason(outcome.finish_reason),
-        }],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
         "usage": {
             "prompt_tokens": outcome.prompt_tokens,
             "completion_tokens": outcome.completion_tokens,
             "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
         },
-        "cordon": {
-            "request_id": outcome.request_id,
-            "session_id": outcome.session_id,
-            "client_id": outcome.client_id,
-            "timestamp": timestamp,
-            "output_hash": outcome.output_hash,
-            "mrenclave": outcome.mrenclave,
-            "content_policy": {
-                "triggered": outcome.content_policy_triggered,
-                "rules_matched": outcome.policy_rules_matched,
-            },
-            "covert_channel": {
-                "anomaly_detected": outcome.covert_channel_score > threshold,
-                "anomaly_score": outcome.covert_channel_score,
-            },
-            "signature": signature,
-        },
+        "cordon": cordon,
     });
-
-    let mut response = (StatusCode::OK, Json(body)).into_response();
-    evidence_headers(
-        response.headers_mut(),
-        &signature.value,
-        &signature.key_provenance,
-    );
-    Ok(response)
+    (body, signature)
 }
 
 fn evidence_headers(headers: &mut HeaderMap, signature: &str, provenance: &str) {

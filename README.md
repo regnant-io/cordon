@@ -861,11 +861,23 @@ curl http://127.0.0.1:8443/openai/v1/chat/completions \
   constrain decoding to JSON (llama.cpp and Ollama both honour it), which lets
   small local models answer workflow decisions reliably. The native API takes
   `inference_params.json_output: true`.
+- **Tool calls.** `tools` and `tool_choice` reach the runtime as sent, and so
+  do earlier assistant `tool_calls` and `tool` results (llama.cpp needs
+  `--jinja` for tools; Ollama supports them natively). The model's calls come
+  back in `message.tool_calls` with `finish_reason: "tool_calls"`, and they
+  are part of the answer Cordon audits and signs: they pass the client's
+  output filter (a rule that would rewrite a call refuses the response rather
+  than return an altered call), and the signed `output_hash` then covers them
+  — SHA-256 of the text, a NUL byte, `tool_calls`, a NUL byte, and the
+  response's `tool_calls` array as compact JSON in the order it appears
+  (`JSON.stringify(...)`, or `json.dumps(..., separators=(",", ":"),
+  ensure_ascii=False)`). `cordon.output_hash_covers` says which form applies.
+  Because a call must be filtered whole, a streaming request that offers
+  tools is generated first and then delivered as a stream.
 - **Not supported.** Image and audio content parts are refused, not dropped.
-  Tool calls are not translated.
 
-Regnant's other systems use this route: Knott (Settings → AI → Cordon), and
-any system with an OpenAI-compatible provider setting. See
+Regnant's other systems use this route: Knott and Wallgarden for decisions
+and briefs, and the agents — Bubbly, SeeP, Weave — with tool calls. See
 `docs/ecosystem.md` in the Regnant workspace for the per-system settings.
 
 ### Streaming

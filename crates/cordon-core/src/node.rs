@@ -225,6 +225,8 @@ pub struct InferenceOutcome {
     pub covert_channel_score: f32,
     pub output_hash: String,
     pub mrenclave: String,
+    /// Tool calls the model made, as the runtime returned them.
+    pub tool_calls: Option<serde_json::Value>,
 }
 
 /// An admitted streaming generation: the request context plus the runtime's
@@ -1124,7 +1126,17 @@ impl CordonNode {
             )));
         }
 
-        let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+        // Tool definitions and earlier tool calls are prompt too: they count
+        // toward the same size limit as the text.
+        let total_chars: usize = messages
+            .iter()
+            .map(|m| {
+                m.content.len()
+                    + m.tool_calls.as_ref().map_or(0, |t| t.to_string().len())
+                    + m.tool_call_id.as_ref().map_or(0, |t| t.len())
+            })
+            .sum::<usize>()
+            + params.tools.as_ref().map_or(0, |t| t.to_string().len());
         if total_chars > limits.max_prompt_chars {
             return Err(CordonError::RequestTooLarge(format!(
                 "prompt of {} bytes exceeds the limit of {}",
@@ -1291,7 +1303,7 @@ impl CordonNode {
         // asked for it.
         let output_filter = self.output_filter.for_client(&policy);
 
-        let input_hash = hash_messages(&messages);
+        let input_hash = hash_input(&messages, &params);
 
         if self
             .attack_detector
@@ -1357,6 +1369,25 @@ impl CordonNode {
 
         let filtered = output_filter.filter(raw.text.clone());
 
+        // Tool calls are output as much as text is, and a call's arguments are
+        // the easiest place to smuggle data out. They pass the same filter. A
+        // rule that would rewrite them refuses the response instead: a
+        // redaction inside a JSON argument would hand the caller a call it
+        // never asked for, which is worse than no call at all.
+        let tool_calls_json = raw.tool_calls.as_ref().map(|t| t.to_string());
+        let tool_verdict = tool_calls_json
+            .as_ref()
+            .map(|json| (output_filter.filter(json.clone()), json.clone()));
+        let filtered = match tool_verdict {
+            Some((verdict, original)) if verdict.blocked || verdict.text != original => {
+                let mut f = filtered;
+                f.blocked = true;
+                f.matches.extend(verdict.matches);
+                f
+            }
+            _ => filtered,
+        };
+
         if filtered.blocked {
             self.metrics.content_policy_hits_total.inc();
             let rule_id = filtered
@@ -1416,7 +1447,7 @@ impl CordonNode {
         self.timing.normalize(started).await;
 
         let latency_ms = started.elapsed().as_millis() as u64;
-        let output_hash = hex::encode(Sha256::digest(filtered.text.as_bytes()));
+        let output_hash = output_digest(&filtered.text, tool_calls_json.as_deref());
         let policy_rules_matched: Vec<String> =
             filtered.matches.iter().map(|m| m.rule_id.clone()).collect();
 
@@ -1462,6 +1493,7 @@ impl CordonNode {
             covert_channel_score: covert.anomaly_score,
             output_hash,
             mrenclave: self.attestation.mrenclave(),
+            tool_calls: raw.tool_calls.clone(),
         })
     }
 
@@ -1511,7 +1543,7 @@ impl CordonNode {
         let policy = self.admit(client, model_id, &messages, &params)?;
         let output_filter = self.output_filter.for_client(&policy);
 
-        let input_hash = hash_messages(&messages);
+        let input_hash = hash_input(&messages, &params);
         if self
             .attack_detector
             .record_input_hash(&client.client_id, &input_hash)
@@ -1720,7 +1752,12 @@ impl CordonNode {
     }
 }
 
+#[cfg(test)]
 fn hash_messages(messages: &[Message]) -> String {
+    hex::encode(message_hasher(messages).finalize())
+}
+
+fn message_hasher(messages: &[Message]) -> Sha256 {
     let mut hasher = Sha256::new();
     for message in messages {
         // Length-prefix each field so distinct message sequences cannot collide
@@ -1729,6 +1766,49 @@ fn hash_messages(messages: &[Message]) -> String {
         hasher.update(message.role.as_bytes());
         hasher.update((message.content.len() as u64).to_le_bytes());
         hasher.update(message.content.as_bytes());
+        // Tool fields only when present, so a text-only conversation hashes
+        // exactly as it always has and existing audit records stay comparable.
+        if let Some(calls) = &message.tool_calls {
+            let json = calls.to_string();
+            hasher.update(b"\x00tool_calls");
+            hasher.update((json.len() as u64).to_le_bytes());
+            hasher.update(json.as_bytes());
+        }
+        if let Some(id) = &message.tool_call_id {
+            hasher.update(b"\x00tool_call_id");
+            hasher.update((id.len() as u64).to_le_bytes());
+            hasher.update(id.as_bytes());
+        }
+    }
+    hasher
+}
+
+/// The input hash recorded in the audit log: the messages, and the tool
+/// definitions when the request offered any.
+fn hash_input(messages: &[Message], params: &InferenceParams) -> String {
+    let mut hasher = message_hasher(messages);
+    if let Some(tools) = &params.tools {
+        let json = tools.to_string();
+        hasher.update(b"\x00tools");
+        hasher.update((json.len() as u64).to_le_bytes());
+        hasher.update(json.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// The output hash that is audited and signed.
+///
+/// For a text answer it is SHA-256 of the released text, as it always was.
+/// When the model also called tools, the calls are part of the answer and
+/// are covered too: SHA-256 of the text, a NUL byte, the literal
+/// `tool_calls`, a NUL byte, and the calls as compact JSON exactly as the
+/// response returns them.
+pub fn output_digest(text: &str, tool_calls_json: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    if let Some(json) = tool_calls_json {
+        hasher.update(b"\x00tool_calls\x00");
+        hasher.update(json.as_bytes());
     }
     hex::encode(hasher.finalize())
 }
@@ -1882,20 +1962,24 @@ mod tests {
             Message {
                 role: "user".into(),
                 content: "ab".into(),
+                ..Default::default()
             },
             Message {
                 role: "user".into(),
                 content: "c".into(),
+                ..Default::default()
             },
         ];
         let b = vec![
             Message {
                 role: "user".into(),
                 content: "a".into(),
+                ..Default::default()
             },
             Message {
                 role: "user".into(),
                 content: "bc".into(),
+                ..Default::default()
             },
         ];
         assert_ne!(hash_messages(&a), hash_messages(&b));
@@ -1906,6 +1990,7 @@ mod tests {
         let m = vec![Message {
             role: "user".into(),
             content: "hello".into(),
+            ..Default::default()
         }];
         assert_eq!(hash_messages(&m), hash_messages(&m));
         assert_eq!(hash_messages(&m).len(), 64);

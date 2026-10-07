@@ -14,6 +14,11 @@ All notable changes to Cordon are documented here. The format follows
   admission, audit, filtering and signing are unchanged. Evidence travels in a
   `cordon` object and `x-cordon-*` headers. Errors use OpenAI's shape with
   Cordon's stable code kept.
+- **Tool calls on the OpenAI route.** Tool definitions, earlier calls and
+  tool results reach the runtime; the model's calls come back in OpenAI's
+  shape, pass the output filter, and are covered by the signed output hash
+  (documented in the README). A streaming request with tools is generated
+  whole and then streamed, because a call can only be filtered complete.
 - **JSON-mode decoding.** `response_format: json_object` on the OpenAI route,
   or `inference_params.json_output` on the native API, asks the runtime to
   constrain output to a JSON object.

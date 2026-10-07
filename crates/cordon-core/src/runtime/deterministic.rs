@@ -91,6 +91,7 @@ impl InferenceBackend for DeterministicBackend {
             },
             finish_reason: FinishReason::Stop,
             latency_ms: 0,
+            tool_calls: None,
         })
     }
 
@@ -132,6 +133,7 @@ mod tests {
             messages: vec![Message {
                 role: "user".into(),
                 content: content.into(),
+                ..Default::default()
             }],
             params: InferenceParams::default(),
             timeout: Duration::from_secs(30),

@@ -239,6 +239,7 @@ fn to_core_messages(messages: &[ApiMessage]) -> Vec<Message> {
         .map(|m| Message {
             role: m.role.clone(),
             content: m.content.clone(),
+            ..Default::default()
         })
         .collect()
 }
@@ -252,6 +253,8 @@ fn to_core_params(params: &ApiInferenceParams) -> InferenceParams {
         stop: params.stop.clone(),
         repetition_penalty: params.repetition_penalty,
         json_output: params.json_output,
+        tools: None,
+        tool_choice: None,
     }
 }
 

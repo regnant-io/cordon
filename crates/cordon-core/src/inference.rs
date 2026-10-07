@@ -47,12 +47,19 @@ fn default_client_share(max_sessions: usize) -> usize {
 }
 
 /// A single message in the conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Message {
-    /// Role: `system`, `user`, or `assistant`.
+    /// Role: `system`, `user`, `assistant` or `tool`.
     pub role: String,
     /// Message content.
     pub content: String,
+    /// Tool calls an assistant message made, in OpenAI's shape. Carried to the
+    /// runtime as given; covered by the input hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+    /// For a `tool` message, the id of the call it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// Sampling and generation parameters.
@@ -77,6 +84,13 @@ pub struct InferenceParams {
     /// filter, the audit record or the signature cover.
     #[serde(default)]
     pub json_output: bool,
+    /// Tools the model may call, in OpenAI's `tools` shape. Passed to the
+    /// runtime as given; covered by the input hash and the prompt-size limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<serde_json::Value>,
+    /// OpenAI's `tool_choice`, passed through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 impl Default for InferenceParams {
@@ -89,6 +103,8 @@ impl Default for InferenceParams {
             stop: vec![],
             repetition_penalty: 1.0,
             json_output: false,
+            tools: None,
+            tool_choice: None,
         }
     }
 }
@@ -185,6 +201,8 @@ pub struct RawInferenceOutput {
     pub finish_reason: FinishReason,
     /// Time spent inside the runtime.
     pub latency_ms: u64,
+    /// Tool calls the model made, in OpenAI's shape, when it made any.
+    pub tool_calls: Option<serde_json::Value>,
 }
 
 impl RawInferenceOutput {
