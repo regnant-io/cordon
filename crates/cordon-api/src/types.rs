@@ -53,6 +53,9 @@ pub struct ApiInferenceParams {
     /// Repetition penalty.
     #[serde(default = "default_repetition_penalty")]
     pub repetition_penalty: f32,
+    /// Constrain the runtime's output to a JSON object.
+    #[serde(default)]
+    pub json_output: bool,
 }
 
 fn default_max_tokens() -> u32 {
@@ -77,6 +80,7 @@ impl Default for ApiInferenceParams {
             top_k: 0,
             stop: vec![],
             repetition_penalty: default_repetition_penalty(),
+            json_output: false,
         }
     }
 }

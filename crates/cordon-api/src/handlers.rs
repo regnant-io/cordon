@@ -109,7 +109,7 @@ impl Default for ChainHealth {
 /// When the deployment requires mTLS, only a certificate-derived identity is
 /// accepted. A header-derived identity is refused, because accepting one would
 /// make the whole mTLS configuration decorative.
-fn authenticated_client(
+pub(crate) fn authenticated_client(
     node: &CordonNode,
     vid: VerifiedIdentity,
 ) -> Result<ClientIdentity, ApiErrorResponse> {
@@ -251,12 +251,13 @@ fn to_core_params(params: &ApiInferenceParams) -> InferenceParams {
         top_k: params.top_k,
         stop: params.stop.clone(),
         repetition_penalty: params.repetition_penalty,
+        json_output: params.json_output,
     }
 }
 
 /// Clamp the caller's timeout to the configured ceiling so a request cannot pin
 /// a concurrency slot indefinitely.
-fn resolve_timeout(node: &CordonNode, requested: Option<u64>) -> Duration {
+pub(crate) fn resolve_timeout(node: &CordonNode, requested: Option<u64>) -> Duration {
     let configured = node.config.inference.default_timeout_seconds;
     let seconds = requested.unwrap_or(configured).clamp(1, configured.max(1));
     Duration::from_secs(seconds)
@@ -366,7 +367,7 @@ fn response_signing_payload(
     )
 }
 
-fn sign_response(
+pub(crate) fn sign_response(
     node: &CordonNode,
     request_id: Uuid,
     output_hash: &str,

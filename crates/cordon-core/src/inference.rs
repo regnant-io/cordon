@@ -70,6 +70,13 @@ pub struct InferenceParams {
     pub stop: Vec<String>,
     /// Repetition penalty.
     pub repetition_penalty: f32,
+    /// Ask the runtime to constrain decoding to a JSON object. llama.cpp and
+    /// Ollama both honour OpenAI's `response_format: json_object`; a caller
+    /// that parses the answer (a workflow decision, say) gets valid JSON even
+    /// from a small model. It changes how tokens are sampled, not what the
+    /// filter, the audit record or the signature cover.
+    #[serde(default)]
+    pub json_output: bool,
 }
 
 impl Default for InferenceParams {
@@ -81,6 +88,7 @@ impl Default for InferenceParams {
             top_k: 0,
             stop: vec![],
             repetition_penalty: 1.0,
+            json_output: false,
         }
     }
 }

@@ -52,10 +52,23 @@ pub struct PeerAddr(pub Option<SocketAddr>);
 /// tolerates that.
 pub async fn populate_identity(mut req: Request, next: Next) -> Response {
     if req.extensions().get::<VerifiedIdentity>().is_none() {
+        // An OpenAI client cannot add a header but always sends a bearer
+        // token, so with no x-client-id the token names the client. It is the
+        // same unauthenticated development identity, accepted only where the
+        // header would be: deployments that require mTLS refuse both.
         let client_id = req
             .headers()
             .get("x-client-id")
             .and_then(|v| v.to_str().ok())
+            .or_else(|| {
+                req.headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| {
+                        v.strip_prefix("Bearer ")
+                            .or_else(|| v.strip_prefix("bearer "))
+                    })
+            })
             .map(sanitize_client_id)
             .unwrap_or_else(|| "anonymous".to_string());
 

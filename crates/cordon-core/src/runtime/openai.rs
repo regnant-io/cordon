@@ -121,6 +121,9 @@ impl OpenAiBackend {
         if !request.params.stop.is_empty() {
             body["stop"] = json!(request.params.stop);
         }
+        if request.params.json_output {
+            body["response_format"] = json!({ "type": "json_object" });
+        }
         if stream {
             body["stream_options"] = json!({ "include_usage": true });
         }

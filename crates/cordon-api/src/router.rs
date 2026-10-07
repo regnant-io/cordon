@@ -29,7 +29,7 @@ use crate::{
         inject_peer_addr, inject_request_id, populate_identity, request_logging, require_loopback,
         security_headers,
     },
-    ui,
+    openai, ui,
 };
 
 /// Build the client-facing API router.
@@ -70,7 +70,14 @@ pub fn build_api_router(state: AppState) -> Router {
         .route(
             "/v1/admin/suspend-client",
             post(handlers::admin_suspend_client),
-        );
+        )
+        // OpenAI-compatible translation of the same pipeline; see `openai`.
+        .route("/openai/v1/models", get(openai::list_models))
+        .route(
+            "/openai/v1/chat/completions",
+            post(openai::chat_completions),
+        )
+        .route("/v1/chat/completions", post(openai::chat_completions));
 
     Router::new()
         .merge(public)

@@ -4,6 +4,25 @@ All notable changes to Cordon are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **An OpenAI-compatible route.** `POST /openai/v1/chat/completions` (also
+  `POST /v1/chat/completions`) and `GET /openai/v1/models` translate OpenAI's
+  chat-completions protocol, unary and streaming, onto the existing pipeline:
+  admission, audit, filtering and signing are unchanged. Evidence travels in a
+  `cordon` object and `x-cordon-*` headers. Errors use OpenAI's shape with
+  Cordon's stable code kept.
+- **JSON-mode decoding.** `response_format: json_object` on the OpenAI route,
+  or `inference_params.json_output` on the native API, asks the runtime to
+  constrain output to a JSON object.
+- In Light mode, with no `x-client-id` header, the bearer token names the
+  client, so OpenAI SDKs that cannot add headers can still identify
+  themselves. Refused wherever the header is.
+- A small "by Regnant" mark in the console status bar and the desktop title
+  bar.
+
 ## [2.1.0] - 2026-09-27
 
 The desktop app grows from a Light-mode launcher into the whole product:
