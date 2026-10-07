@@ -1,7 +1,8 @@
 //! Cordon API Server; §17
 //!
 //! Implements all endpoints: /v1/inference, /v1/attestation, /v1/models,
-//! /v1/audit, /v1/admin, /v1/health.
+//! /v1/audit, /v1/admin, /v1/health, and an OpenAI-compatible translation
+//! layer at /openai/v1 (see [`openai`]).
 //! All endpoints require mTLS with client-issued certificates (except basic health).
 
 #![forbid(unsafe_code)]
@@ -10,6 +11,7 @@
 pub mod error;
 pub mod handlers;
 pub mod middleware;
+pub mod openai;
 pub mod pki;
 pub mod router;
 pub mod server;

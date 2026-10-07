@@ -38,6 +38,7 @@ cordon run smollm2-360m-instruct-gguf
 - [Encrypting a model bundle](#encrypting-a-model-bundle)
 - [Verifying what a node tells you](#verifying-what-a-node-tells-you)
 - [The API](#the-api)
+  - [OpenAI-compatible route](#openai-compatible-route)
 - [The operator console](#the-operator-console)
 - [Configuration reference](#configuration-reference)
 - [Environment variables](#environment-variables)
@@ -826,6 +827,58 @@ control, and any later rewrite of the log before that point becomes detectable.
 | `POST /v1/admin/teardown` | K_admin + `admin_allowed` | Zeroize key material and stop. |
 | `POST /v1/admin/suspend-client` | K_admin + `admin_allowed` | Suspend one client. |
 | `GET /metrics` | loopback | Prometheus. Refused from any non-local peer. |
+| `POST /openai/v1/chat/completions` | client | The same pipeline in OpenAI's chat-completions shape. Also at `POST /v1/chat/completions`. |
+| `GET /openai/v1/models` | client | The served model, in OpenAI's list shape. |
+
+### OpenAI-compatible route
+
+Most software that can use a language model already speaks OpenAI's
+chat-completions protocol. Point it at `http://<node>:8443/openai/v1` and it
+uses Cordon without a Cordon-specific client: the request is admitted,
+audited, filtered and signed exactly as `POST /v1/inference` would be, under
+the same client identity.
+
+```bash
+curl http://127.0.0.1:8443/openai/v1/chat/completions \
+  -H 'x-client-id: knott' -H 'Content-Type: application/json' \
+  -d '{"model": "default", "messages": [{"role": "user", "content": "Habari?"}]}'
+```
+
+- **Identity.** Under mutual TLS, the client certificate, as always. In Light
+  mode, the `x-client-id` header; a client that cannot add a header may put
+  the client ID in its API key, since the bearer token is read as the client ID
+  when no header is present. That is the same spoofable development identity,
+  refused wherever the header would be.
+- **Model.** `default` (or no model) means the model the node loaded. Any
+  other name is checked against the client's `permitted_models` and passed to
+  the runtime.
+- **Evidence.** The response carries a `cordon` object (request ID, output
+  hash, measurement, content-policy outcome and the Ed25519 signature) and
+  `x-cordon-signature` / `x-cordon-key-provenance` headers. A stream carries the
+  same object on its last chunk, before `data: [DONE]`. OpenAI clients ignore
+  both; the signature verifies exactly as described above.
+- **JSON mode.** `response_format: {"type": "json_object"}` asks the runtime to
+  constrain decoding to JSON (llama.cpp and Ollama both honour it), which lets
+  small local models answer workflow decisions reliably. The native API takes
+  `inference_params.json_output: true`.
+- **Tool calls.** `tools` and `tool_choice` reach the runtime as sent, and so
+  do earlier assistant `tool_calls` and `tool` results (llama.cpp needs
+  `--jinja` for tools; Ollama supports them natively). The model's calls come
+  back in `message.tool_calls` with `finish_reason: "tool_calls"`, and they
+  are part of the answer Cordon audits and signs: they pass the client's
+  output filter (a rule that would rewrite a call refuses the response rather
+  than return an altered call), and the signed `output_hash` then covers them
+  — SHA-256 of the text, a NUL byte, `tool_calls`, a NUL byte, and the
+  response's `tool_calls` array as compact JSON in the order it appears
+  (`JSON.stringify(...)`, or `json.dumps(..., separators=(",", ":"),
+  ensure_ascii=False)`). `cordon.output_hash_covers` says which form applies.
+  Because a call must be filtered whole, a streaming request that offers
+  tools is generated first and then delivered as a stream.
+- **Not supported.** Image and audio content parts are refused, not dropped.
+
+Regnant's other systems use this route: Knott and Wallgarden for decisions
+and briefs, and the agents — Bubbly, SeeP, Weave — with tool calls. See
+`docs/ecosystem.md` in the Regnant workspace for the per-system settings.
 
 ### Streaming
 

@@ -37,6 +37,7 @@ fn messages(text: &str) -> Vec<Message> {
     vec![Message {
         role: "user".into(),
         content: text.into(),
+        ..Default::default()
     }]
 }
 
@@ -259,6 +260,7 @@ async fn oversized_requests_are_refused_cheaply() {
         .map(|i| Message {
             role: "user".into(),
             content: format!("message {}", i),
+            ..Default::default()
         })
         .collect();
     assert!(matches!(

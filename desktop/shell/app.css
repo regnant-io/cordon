@@ -429,3 +429,6 @@ dialog[open] { animation: pop 160ms var(--ease); }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .page { padding: 28px 28px 48px; }
 }
+
+/* The maker's mark beside the product name. */
+.by-regnant { margin-left: 8px; font-size: 10px; font-weight: 400; letter-spacing: .06em; opacity: .6; text-transform: uppercase; }
